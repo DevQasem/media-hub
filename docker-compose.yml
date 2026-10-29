@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  media-hub:
+    build: .
+    container_name: media-hub
+    ports:
+      - "5000:5000"
+    volumes:
+      # Maps your local ./hub-data folder to the hardcoded path in your app.py
+      - ./hub-data:/root/media-downloader
+    restart: unless-stopped

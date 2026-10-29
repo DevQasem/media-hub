@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" id="themeMeta" content="#07080f">
+<title>Media Hub</title>
+<!-- Notice the /assets/ path here -->
+<link rel="stylesheet" href="/assets/style.css">
+<script id="early">try{var u=JSON.parse(localStorage.getItem("hub_ui")||"{}"),d=document.documentElement;["theme","size","density"].forEach(function(k){if(u[k])d.dataset[k]=u[k]})}catch(e){}</script>
+<!-- Notice the /assets/ path here -->
+<script src="/assets/script.js" defer></script>
+</head>
+<body data-site="other" data-tab="home">
+<div class="bg" aria-hidden="true"><i></i><i></i><i></i></div>
+
+<header class="top"><div class="top-in">
+  <div class="logo">🚀</div><div><h1>Media Hub</h1><small>Videos · Photos · Stories · Auto-watch</small></div>
+  <div class="pills"><span class="pill" id="pillRun">⏳ idle</span><span class="pill" id="pillWatch">👁 0 watching</span></div>
+  <button class="wrench" id="gearBtn" aria-label="Settings" title="Settings"><span>⚙️</span><i class="wdot" id="gdot"></i></button>
+  <button class="wrench" id="wrenchBtn" aria-label="Maintenance" title="Maintenance"><span>🔧</span><i class="wdot" id="wdot"></i></button>
+</div>
+  <div class="netbar" id="netbar" role="status"></div>
+</header>
+
+<main class="wrap">
+  <div id="strip" class="view-home"></div>
+
+  <section class="hero view-home">
+    <h2 class="headline">Paste a link.<br><span class="shine">Get the file.</span></h2>
+    <p class="sub">TikTok, YouTube, Instagram, Snapchat and more - saved in the best quality.</p>
+
+    <div class="clipbar" id="clipbar"><span id="cliptxt"></span><button class="mini" id="useClipBtn">Use it</button><button class="mini" id="dismissClipBtn" aria-label="Dismiss">✕</button></div>
+
+    <div class="smart" id="smart">
+      <span class="badge" id="badge">Any link</span>
+      <input id="url" placeholder="Paste a video link, or a Snapchat @username" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button class="icon-btn" id="pasteBtn">Paste</button>
+      <button class="icon-btn" id="clearBtn" style="display:none" aria-label="Clear">✕</button>
+    </div>
+    <p class="hint" id="hint"></p>
+    <div class="platforms" id="platforms"></div>
+    <p class="kbd-tip">⌨ <kbd>/</kbd> jump to the box · paste anywhere on the page · <kbd>?</kbd> all shortcuts</p>
+
+    <!-- video preview -->
+    <div class="preview" id="preview">
+      <div class="thumb loading" id="thumb"><div class="timg" id="timg0"></div><div class="tclip"><div class="timg" id="timg"></div></div><span class="cmpline"><i></i></span><input type="range" class="cmp" id="cmp" min="0" max="100" value="50" aria-label="Drag to compare the original with your look"><span class="cmplab l">Original</span><span class="cmplab r">With look</span><span class="badge site" id="siteBadge"></span><span class="dur" id="dur" style="display:none"></span></div>
+      <div class="pinfo"><div class="ptitle" id="ptitle" title="Tap to show the full title"></div><div class="chips" id="chips"></div></div>
+    </div>
+    <!-- snapchat preview -->
+    <div class="preview" id="snapbox">
+      <div class="pinfo"><div class="snapname" id="snapname"></div><div class="chips" id="snapchips"></div></div>
+    </div>
+    <!-- instagram photos -->
+    <div class="preview" id="igbox">
+      <div class="pinfo"><div class="snapname" id="igtitle"></div><div class="chips" id="igchips"></div></div>
+      <p class="pnote" id="ignote"></p>
+      <p class="pnote">👁 Watching Instagram accounts is not available yet.</p>
+    </div>
+
+    <!-- main download button -->
+    <div class="actions" id="actions">
+      <button class="brandbtn" id="goBtn">
+        <span class="bicon" id="goIcon">⬇</span>
+        <span class="btxt"><b id="goLabel">Download</b><small id="goSub">Best quality</small></span>
+        <span class="barrow">⬇</span>
+      </button>
+      <button class="custbtn" id="custBtn"><span class="sp">✨</span> Customize <i class="cdot"></i><span id="optsum"></span><span class="chev">▼</span></button>
+      <div class="watchrow" id="watchrow"><span id="watchTxt">👁 Auto-download new posts</span>
+        <select id="wint" aria-label="How often to check"><option value="15">every 15 min</option><option value="30">every 30 min</option><option value="60" selected>every 1 hour</option><option value="180">every 3 hours</option><option value="360">every 6 hours</option><option value="720">every 12 hours</option><option value="1440">every day</option></select>
+        <button class="icon-btn" id="watchBtn">Watch</button></div>
+    </div>
+
+    <!-- customize panel -->
+    <div class="custom" id="custom">
+      <div class="csec" data-show="video,audio,image,gif,sticker"><div class="olabel">What do you want?</div>
+        <div class="seg" id="kindseg">
+          <button data-kind="video"><b>🎬</b>Video</button><button data-kind="audio"><b>🎵</b>MP3 / audio</button><button data-kind="image"><b>🖼</b>Photo</button><button data-kind="gif"><b>🎞</b>GIF</button><button data-kind="sticker"><b>🧩</b>Sticker</button>
+        </div></div>
+      <div class="csec" data-show="video,image,snap,gif,sticker,ig"><div class="olabel">✨ Look - tap one, the preview changes live</div><div class="looks" id="looks"></div></div>
+      <div class="csec" data-show="video,audio,image,gif,sticker"><div class="olabel">⚡ Quick presets</div><div class="presets" id="presets"></div></div>
+
+      <details class="more"><summary>⚙️ More options</summary>
+      <div id="optpanel">
+        <div class="osec" data-show="video"><div class="olabel">Video</div>
+          <div class="grid2">
+            <div class="fld"><label>Quality</label><select data-o="quality"><option value="best">Best available</option><option value="2160">4K (2160p)</option><option value="1440">1440p</option><option value="1080">1080p</option><option value="720">720p</option><option value="480">480p</option><option value="360">360p</option></select></div>
+            <div class="fld"><label>Container</label><select data-o="container"><option value="mp4">MP4 (most compatible)</option><option value="mkv">MKV (any codec)</option><option value="webm">WebM</option></select></div>
+          </div>
+          <div class="tgs" style="margin-top:10px"><label class="tg"><input type="checkbox" data-o="compat"><span>📱 Phone/TV friendly (H.264)</span></label></div></div>
+
+        <div class="osec" data-show="audio"><div class="olabel">Audio</div>
+          <div class="grid2">
+            <div class="fld"><label>Format</label><select data-o="audio_fmt"><option value="mp3">MP3</option><option value="m4a">M4A (AAC)</option><option value="opus">Opus</option><option value="flac">FLAC (lossless)</option><option value="wav">WAV</option></select></div>
+            <div class="fld"><label>Bitrate (MP3/M4A/Opus)</label><select data-o="abr"><option value="96">96 kbps</option><option value="128">128 kbps</option><option value="192">192 kbps</option><option value="256">256 kbps</option><option value="320">320 kbps</option></select></div>
+          </div></div>
+
+        <div class="osec" data-show="image"><div class="note">🖼 Saves the post's cover / photo as a <b>JPG</b>, without downloading the video. Works for any site yt-dlp can read (YouTube thumbnails, TikTok covers, many photo posts).</div></div>
+        <div class="osec" data-show="gif,sticker"><div class="note">🎞 <b>GIF</b>: first 8 s (or your clip, up to 15 s), 480 px, looping.<br>🧩 <b>Sticker</b>: 512×512 animated WebP of up to 6 s, auto-shrunk under 500 KB (WhatsApp size). A photo becomes a static sticker. Use <b>Clip</b> below to pick the part, and <b>Effects</b> to style it.</div></div>
+        <div class="osec" data-show="ig"><div class="note">📸 Instagram photos, carousels, stories, highlights and profiles are saved with <b>gallery-dl</b> into <i>instagram/&lt;username&gt;/</i>. Looks and effects (below) are applied to the new files. A whole profile takes only the first items (see <b>Items</b>) so Instagram does not get suspicious.</div></div>
+
+        <div class="osec" data-show="video,audio,image"><div class="olabel">Extras</div>
+          <div class="tgs">
+            <label class="tg" data-show="video,audio"><input type="checkbox" data-o="subs"><span>💬 Subtitles</span></label>
+            <label class="tg" data-show="video,audio"><input type="checkbox" data-o="autosubs"><span>🤖 Auto-captions</span></label>
+            <label class="tg" data-show="video"><input type="checkbox" data-o="embed_subs"><span>📎 Embed subs</span></label>
+            <label class="tg" data-show="video,audio"><input type="checkbox" data-o="thumb"><span>🖼 Save cover</span></label>
+            <label class="tg" data-show="video,audio"><input type="checkbox" data-o="embed_thumb"><span>🎨 Embed cover art</span></label>
+            <label class="tg" data-show="video,audio"><input type="checkbox" data-o="meta"><span>🏷 Embed tags &amp; chapters</span></label>
+            <label class="tg" data-show="video,audio"><input type="checkbox" data-o="sponsor"><span>⏭ Skip sponsors (YouTube)</span></label>
+            <label class="tg" data-show="video,audio,image"><input type="checkbox" data-o="desc"><span>📝 Save description</span></label>
+            <label class="tg" data-show="video,audio,image"><input type="checkbox" data-o="force"><span>🔁 Re-download if it exists</span></label>
+          </div>
+          <div class="fld" style="margin-top:10px;max-width:260px" data-show="video,audio"><label>Subtitle languages (comma separated)</label><input data-o="sub_langs" placeholder="en,ar"></div></div>
+        <div class="osec" data-show="ig"><div class="tgs"><label class="tg"><input type="checkbox" data-o="force"><span>🔁 Re-download if it exists</span></label></div></div>
+
+        <div class="osec" data-show="video,image,snap,gif,sticker,ig"><div class="olabel">✨ Effects &amp; looks (applied after download)</div>
+          <div class="grid2">
+            <div class="fld"><label>Look</label><select data-o="fx_look"><option value="none">None</option><option value="bw">⚫ Black &amp; white</option><option value="sepia">🟤 Sepia</option><option value="negative">🔄 Negative</option><option value="vivid">🌈 Vivid colors</option><option value="warm">🔥 Warm</option><option value="cool">❄️ Cool</option><option value="vintage">📼 Vintage</option><option value="cinematic">🎞 Cinematic</option></select></div>
+            <div class="fld"><label>Blur</label><select data-o="fx_blur"><option value="none">None</option><option value="light">Light</option><option value="strong">Strong</option></select></div>
+            <div class="fld"><label>Mirror</label><select data-o="fx_mirror"><option value="none">None</option><option value="h">Left ↔ right</option><option value="v">Up ↕ down</option></select></div>
+            <div class="fld"><label>Rotate</label><select data-o="fx_rotate"><option value="0">None</option><option value="90">90° clockwise</option><option value="180">180°</option><option value="270">90° counter-clockwise</option></select></div>
+            <div class="fld" data-show="video,snap,gif,sticker,ig"><label>Speed</label><select data-o="fx_speed"><option value="0.5">0.5× slow</option><option value="1" selected>Normal</option><option value="1.5">1.5×</option><option value="2">2× fast</option></select></div>
+            <div class="fld"><label>Crop</label><select data-o="fx_crop"><option value="none">None</option><option value="square">Square 1:1</option><option value="vertical">Vertical 9:16</option></select></div>
+            <div class="fld"><label>Resize (height)</label><select data-o="fx_scale"><option value="none">Original</option><option value="1080">1080</option><option value="720">720</option><option value="480">480</option></select></div>
+          </div>
+          <div class="tgs" style="margin-top:10px">
+            <label class="tg"><input type="checkbox" data-o="fx_sharpen"><span>🔍 Sharpen</span></label>
+            <label class="tg" data-show="video,snap,ig"><input type="checkbox" data-o="fx_mute"><span>🔇 Remove sound</span></label>
+            <label class="tg"><input type="checkbox" data-o="fx_keep"><span>📁 Keep the original too</span></label>
+          </div>
+          <p class="note" style="margin:10px 0 0">The new file is saved next to the original, e.g. <i>My video [bw].mp4</i>. Needs ffmpeg on the server.</p></div>
+
+        <div class="osec" data-show="video,audio,image,gif,sticker,ig"><div class="olabel">Playlist / items</div>
+          <div class="grid2">
+            <div class="fld" data-show="video,audio,image,gif,sticker"><label>If the link is a playlist</label><select data-o="playlist"><option value="single">Only this video</option><option value="all">Whole playlist</option></select></div>
+            <div class="fld"><label>Items (optional)</label><input data-o="items" placeholder="1-5 or 1,3,7"></div>
+          </div>
+          <p class="note" data-show="ig" style="margin:8px 0 0">For an Instagram profile, type a range here (for example <b>1-60</b>) to take more or fewer than the default.</p></div>
+
+        <div class="osec" data-show="video,audio,gif,sticker"><div class="olabel">Clip (cut a part)</div>
+          <div class="grid2">
+            <div class="fld"><label>Start (e.g. 1:30)</label><input data-o="clip_start" placeholder="0:00"></div>
+            <div class="fld"><label>End (e.g. 2:45)</label><input data-o="clip_end" placeholder="end of video"></div>
+          </div></div>
+
+        <div class="osec" data-show="video,audio,image,gif,sticker"><div class="olabel">Filters - only download if…</div>
+          <div class="grid2">
+            <div class="fld"><label>Posted after</label><input type="date" data-o="date_after"></div>
+            <div class="fld"><label>Posted before</label><input type="date" data-o="date_before"></div>
+            <div class="fld"><label>Min length (minutes)</label><input data-o="min_dur" inputmode="decimal" placeholder="e.g. 2"></div>
+            <div class="fld"><label>Max length (minutes)</label><input data-o="max_dur" inputmode="decimal" placeholder="e.g. 20"></div>
+            <div class="fld"><label>Min views</label><input data-o="min_views" inputmode="numeric" placeholder="e.g. 10000"></div>
+            <div class="fld"><label>Max file size (MB)</label><input data-o="max_mb" inputmode="numeric" placeholder="e.g. 500"></div>
+            <div class="fld"><label>Title contains</label><input data-o="title_has" placeholder="word"></div>
+            <div class="fld"><label>Title does NOT contain</label><input data-o="title_not" placeholder="word"></div>
+          </div>
+          <p class="note" style="margin:10px 0 0">Filters matter most for playlists, batches and the watchlist - they decide which posts are worth keeping.</p></div>
+      </div></details>
+      <div class="csec" style="margin-top:14px"><button class="icon-btn" id="resetPresetBtn">↺ Back to the normal download</button></div>
+    </div>
+
+    <button class="linkbtn" id="toggleBatchBtn">📋 Paste many links at once</button>
+    <div id="batchbox">
+      <textarea id="batchtxt" placeholder="One link or Snapchat username per line…"></textarea>
+      <button class="btn primary wide" id="startBatchBtn">⬇ Download all (uses your Customize choices)</button>
+    </div>
+  </section>
+
+  <section class="card view-watch" id="watchcard">
+    <h3 class="sec">👁 Watchlist</h3>
+    <p class="hint" style="margin-top:2px">New posts from these accounts download automatically - even with this page closed. <b>Every account has its own timer</b> (one every 15 min, another every hour…). Your phone gets a push only from here.</p>
+    <div id="wlist"></div>
+  </section>
+
+</main>
+
+<!-- progress / result popup -->
+<div class="overlay" id="modal" role="dialog" aria-modal="true"><div class="mcard">
+  <div id="m-load">
+    <div class="pring big ind" id="mring"><b id="mpct">0%</b></div><b id="ltitle">Downloading…</b>
+    <div class="bar"><div id="bar"></div></div>
+    <div id="lmsg">Starting…</div><div id="lmeta"></div>
+    <div class="mrow"><button class="btn ghost" id="cancelBtn">Cancel</button><button class="btn primary" id="runBackgroundBtn">Run in background</button></div>
+    <p class="hint" style="text-align:center">It keeps downloading on the server even if you close this page.</p>
+  </div>
+  <div id="m-res" style="display:none">
+    <div id="rico"></div><h3 id="rtitle"></h3>
+    <div id="rdesc" style="color:var(--mute);font-size:.88rem;word-break:break-word"></div>
+    <div id="rlog"></div><div id="rfiles"></div><div id="rbtns" style="display:grid;gap:8px"></div>
+  </div>
+</div></div>
+
+<!-- settings -->
+<div class="overlay" id="smodal" role="dialog" aria-modal="true" aria-label="Settings"><div class="mcard sheet">
+  <div class="shead"><h3>⚙️ Settings</h3><button class="mini" id="closeSettingsBtn" aria-label="Close settings">✕</button></div>
+  <div class="olabel">🎨 Appearance</div>
+  <div class="sublab" style="margin-top:0">Theme</div>
+  <div class="opt" id="themeOptBox"><button data-ui="theme:dark">🌙 Dark</button><button data-ui="theme:light">☀️ Light</button><button data-ui="theme:auto">🌗 Auto</button></div>
+  <div class="sublab">Accent color</div>
+  <div class="opt" id="accents"><button class="sw auto" data-ui="accent:auto" title="Follows the site you paste (TikTok, YouTube…)" aria-label="Accent: follow the site"></button></div>
+  <div class="sublab">Text size</div>
+  <div class="opt" id="sizeOptBox"><button data-ui="size:s" style="font-size:.74rem">Small</button><button data-ui="size:m">Normal</button><button data-ui="size:l" style="font-size:.95rem">Large</button><button data-ui="size:xl" style="font-size:1.05rem">Extra large</button></div>
+  <div class="sublab">Layout</div>
+  <div class="opt" id="densityOptBox"><button data-ui="density:comfy">Comfortable</button><button data-ui="density:compact">Compact</button></div>
+  <div style="margin-top:12px"><label class="tg"><input type="checkbox" id="confettiOn"><span>🎉 Confetti when a download finishes</span></label></div>
+    <div class="olabel" style="margin-top:18px">🔔 Phone notifications (watchlist only)</div>
+    <div class="row2">
+      <input id="ntfy" placeholder="ntfy topic, e.g. media-hub-k39xq2" autocomplete="off" spellcheck="false">
+      <button class="icon-btn" id="saveNtfyBtn">Save</button><button class="icon-btn" id="testNtfyBtn">Send test</button>
+    </div>
+    <p class="hint">1) Install the free <b>ntfy</b> app. 2) Subscribe to a long random topic. 3) Type the same name here. Example alert:
+      <b>👁 @user posted 3 new</b> - "2 videos, 1 photo".</p>
+
+    <div class="olabel" style="margin-top:16px">📁 Folders</div>
+    <label class="tg"><input type="checkbox" id="creatorFolders"><span>Save into creator folders (youtube/CreatorName/…)</span></label>
+
+    <div class="olabel" id="igSection" style="margin-top:16px">📸 Instagram login</div>
+    <p class="hint" id="igstat" style="margin-top:0"></p>
+    <details class="steps"><summary>How do I get my cookies.txt? (step by step)</summary>
+      <ol>
+        <li>On a <b>computer</b>, open Chrome, Edge or Firefox and log in to <b>instagram.com</b> with a <b>spare (throwaway) account</b>.</li>
+        <li>Install the free extension <b>“Get cookies.txt LOCALLY”</b>.</li>
+        <li>Click the extension’s icon, then press <b>Export</b>. If it asks for a format, choose <b>Netscape</b>.</li>
+        <li>Press <b>Choose file</b> below and pick that cookies.txt - <b>or</b> paste the text into the box. Then press <b>Save login</b>.</li>
+        <li>Do <b>not</b> press “Log out” on Instagram in that browser.</li>
+      </ol>
+    </details>
+    <div class="warnbox"><b>⚠ Please read</b>
+      <ul>
+        <li>Use a <b>throwaway account</b>. Instagram can lock accounts that download a lot.</li>
+        <li><b>Don’t log out</b> in that browser, or the cookies stop working.</li>
+      </ul></div>
+    <input type="file" id="igfile" accept=".txt,text/plain">
+    <textarea id="igtext" placeholder="…or paste the text of cookies.txt here" spellcheck="false" autocomplete="off"></textarea>
+    <div class="row2" style="margin-top:8px"><button class="icon-btn" id="igSave">💾 Save login</button><button class="icon-btn" id="igRemove">🗑 Remove login</button></div>
+    <div class="fld" style="margin-top:12px;max-width:300px"><label>Items taken when downloading a whole profile</label><input id="igcap" inputmode="numeric" placeholder="30"></div>
+
+    <div class="olabel" style="margin-top:16px">📋 Clipboard</div>
+    <label class="tg"><input type="checkbox" id="clipOn"><span>Offer links I copied (shows “Use it” when you open the page)</span></label>
+    <p class="hint" id="clipstat"></p>
+  <button class="btn primary wide" id="smodalDoneBtn">Done</button>
+</div></div>
+
+<!-- maintenance -->
+<div class="overlay" id="mmodal" role="dialog" aria-modal="true"><div class="mcard">
+  <div style="font-size:2.2rem">🔧</div><h3>Maintenance</h3>
+  <p class="hint" style="text-align:center;margin:0 0 14px">What the server needs to work, and how to keep it up to date.</p>
+  <div id="verlist" style="margin-bottom:12px"></div>
+  <div class="mrow"><button class="btn ghost" id="updBtn">⬆ Update yt-dlp</button><button class="btn ghost" id="rstBtn">🔄 Restart app</button></div>
+  <p class="hint" id="updmsg" style="text-align:center"></p>
+  <button class="btn primary wide" id="mmodalCloseBtn">Close</button>
+</div></div>
+<nav class="tabbar" id="tabbar" aria-label="Main">
+  <i class="tabind"></i>
+  <button data-tab="home" class="on"><span>🏠</span>Home<em id="tbRun"></em></button>
+  <button data-tab="watch"><span>👁</span>Watchlist<em id="tbWatch"></em></button>
+  <button id="navSettingsBtn"><span>⚙️</span>Settings<i class="wdot" id="gdot2"></i></button>
+  <button id="navMaintBtn"><span>🔧</span>Tools<i class="wdot" id="wdot2"></i></button>
+</nav>
+
+<!-- keyboard shortcuts -->
+<div class="overlay" id="kmodal" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts"><div class="mcard sheet" style="max-width:420px">
+  <div class="shead"><h3>⌨ Shortcuts</h3><button class="mini" id="closeKeysBtn" aria-label="Close">✕</button></div>
+  <div class="krow"><span>Jump to the link box</span><span><kbd>/</kbd> or <kbd>Ctrl</kbd>+<kbd>K</kbd></span></div>
+  <div class="krow"><span>Paste a link from anywhere on the page</span><span><kbd>Ctrl</kbd>+<kbd>V</kbd></span></div>
+  <div class="krow"><span>Download</span><span><kbd>Enter</kbd></span></div>
+  <div class="krow"><span>Open / close Customize</span><span><kbd>C</kbd></span></div>
+  <div class="krow"><span>Settings</span><span><kbd>S</kbd></span></div>
+  <div class="krow"><span>Tools (maintenance)</span><span><kbd>T</kbd></span></div>
+  <div class="krow"><span>Watchlist / Home</span><span><kbd>W</kbd> / <kbd>H</kbd></span></div>
+  <div class="krow"><span>Close any popup</span><span><kbd>Esc</kbd></span></div>
+  <p class="note" style="margin:12px 0 0">You can also drag a link from another tab and drop it on the page.</p>
+</div></div>
+<div id="confetti" aria-hidden="true"></div>
+<div id="toast"></div>
+
+</body>
+</html>
