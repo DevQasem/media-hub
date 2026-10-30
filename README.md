@@ -3,92 +3,102 @@
 > 🤖 **100% AI-Generated Project**
 > *This entire application—from the responsive frontend and the robust Flask backend to the Docker architecture and this very README—was built end-to-end by an AI collaborator. It stands as a testament to the power of AI-assisted software engineering.*
 
-Universal Media Hub is a sleek, heavily optimized, and fully Dockerized web interface for downloading high-quality media across the web. It bridges the gap between powerful command-line scraping tools and a seamless, beautiful user experience.
+A powerful, self-hosted web application that downloads videos, audio, photos, and stories from platforms like YouTube, TikTok, Instagram, and Snapchat. It features a responsive UI with dynamic platform-specific color themes, automatic watchlist background downloading, and built-in media processing.
 
 ## ✨ Features
+*   **Universal Support:** Works with YouTube, TikTok, Instagram (Posts/Stories/Profiles), Snapchat, X/Twitter, and more.
+*   **Smart Fallbacks:** Automatically detects media types (e.g., TikTok photo slideshows vs. standard videos).
+*   **Background Watchlist:** Set a timer to automatically download new posts from your favorite creators.
+*   **Dynamic UI:** The interface seamlessly changes its accent colors to match the platform of the pasted link.
+*   **Built-in Processing:** Crop, convert to MP3, create looping GIFs, or generate WhatsApp-ready stickers via `ffmpeg`.
 
-* 🎬 **Omnivorous Downloader:** Natively integrates `yt-dlp`, `gallery-dl`, and `snapchat-dl` to conquer YouTube, TikTok, Instagram (Posts/Reels/Stories), Snapchat, X/Twitter, and hundreds of other platforms.
+---
 
-* 🎨 **Studio-Grade Processing:** Built-in `ffmpeg` processing lets you apply cinematic color grading, crop to vertical formats, strip audio, or convert clips into looping GIFs and WhatsApp-sized WebP stickers on the fly.
+## 🛠️ Prerequisites
 
-* 👁️ **Relentless Watchlists:** Add your favorite creators to a watchlist and let the server quietly fetch their new posts in the background.
+Before you begin, ensure your system has the following installed:
 
-* 📱 **Frictionless UI:** A gorgeous, app-like responsive design featuring dark/auto themes, drag-and-drop link support, clipboard auto-detection, and a mobile-optimized bottom tab bar.
+**For Windows:**
+1. Download and install [Git for Windows](https://gitforwindows.org/).
+2. Download and install [Docker Desktop](https://www.docker.com/products/docker-desktop/). Ensure it is running in the background.
 
-* 🐳 **Containerized Perfection:** Fully Dockerized for zero-mess deployments. No Python version conflicts, no missing system packages, no headaches.
-
-## 🛠️ The 60-Second Deploy (Fresh Ubuntu Server)
-
-Starting with a brand-new Ubuntu VPS? You don't need to manually wrestle with Python or install `ffmpeg`. Docker handles the entire ecosystem for you.
-
-Connect to your server via SSH and execute the following:
-
-**1. Update the system and equip the basics**
-
-```
-sudo apt update && sudo apt upgrade -y
-sudo apt install -y curl git
-
-```
-
-**2. Summon Docker & Docker Compose**
-
-```
-curl -fsSL https://get.docker.com -o get-docker.sh
-sudo sh get-docker.sh
-
+**For Linux (Ubuntu/Debian):**
+Open your terminal and install Git, Docker, and Docker Compose:
+```bash
+sudo apt update && sudo apt install git docker.io docker-compose -y
+sudo systemctl enable --now docker
+sudo usermod -aG docker $USER
+# (Log out and log back in to apply Docker permissions)
 ```
 
-**3. Clone the Hub**
+---
 
-```
-git clone https://github.com/DevQasem/media-hub.git
-cd media-hub
+## 🚀 Installation & Setup (Recommended)
 
-```
+Since the Universal Media Hub is containerized, the installation process is identical for both Windows and Linux using Docker.
 
-**4. Ignite the Engine!**
-
-```
-sudo docker compose up -d --build
-
+### Step 1: Clone the Repository
+Open your terminal (or Command Prompt / PowerShell on Windows) and run:
+```bash
+git clone https://github.com/YOUR_USERNAME/universal-media-hub.git
+cd universal-media-hub
 ```
 
-### 🎉 You're Live!
-
-Once the build completes, open your web browser and navigate to:
-`http://<YOUR_SERVER_IP>:5000`
-
-## 🌍 Going Global (Zero-Trust Security)
-
-Want to access your Media Hub from anywhere without exposing your server's true IP address or opening dangerous firewall ports? Deploy a **Cloudflare Tunnel**.
-
-1. Create a free account at the [Cloudflare Zero Trust Dashboard](https://one.dash.cloudflare.com/).
-
-2. Navigate to **Networks** > **Tunnels** and click **Create a tunnel**.
-
-3. Name your tunnel and copy the provided installation command for Linux/Debian.
-
-4. Paste that command directly into your Ubuntu server terminal.
-
-5. In the Cloudflare dashboard, map your slick public domain (like `hub.yourdomain.com`) to your local app at `http://localhost:5000`.
-
-Your app is now securely accessible worldwide via HTTPS!
-
-## 🗂️ The Vault (Where your files live)
-
-Thanks to Docker volumes, your downloaded videos, configurations, and application states are safely bridged directly to your host machine. Look inside the newly created `hub-data` folder right next to your code:
-
+### Step 2: Start the Server
+Build and run the container in detached mode using Docker Compose:
+```bash
+docker-compose up -d --build
 ```
-media-hub/
- ┗ 📂 hub-data/           
-    ┣ 📂 youtube/         # Downloaded YouTube/TikTok videos
-    ┣ 📂 instagram/       # Gallery-dl media captures
-    ┣ 📂 snapchat/        # Snapchat story archives
-    ┗ 📜 cookies.txt      # Your securely mapped Instagram login
+*Note: Docker will automatically pull a lightweight Python 3.11 image, install Gunicorn, `yt-dlp`, `gallery-dl`, `snapchat-dl`, and configure `ffmpeg`.*
 
+### Step 3: Access the Hub
+Open your web browser and navigate to:
+```text
+http://localhost:5000
+```
+All downloaded media, caches, and archive files are safely stored in the local `hub-data/` folder in your project directory.
+
+---
+
+## 💻 Manual Installation (Without Docker)
+
+If you prefer to run the app natively on your host machine without Docker:
+
+### Windows Native Setup
+1. Install [Python 3.11+](https://www.python.org/downloads/) (Check "Add python.exe to PATH" during installation).
+2. Install [FFmpeg for Windows](https://gyan.dev/ffmpeg/builds/) and add it to your System Environment PATH.
+3. Open PowerShell as Administrator and install the required tools:
+```powershell
+pip install Flask gunicorn yt-dlp gallery-dl snapchat-dl
+```
+4. Start the Flask application:
+```powershell
+python app.py
 ```
 
-## 📸 The Instagram Checkpoint
+### Linux Native Setup
+1. Install Python, pip, and FFmpeg:
+```bash
+sudo apt update
+sudo apt install python3 python3-pip ffmpeg -y
+```
+2. Install the required Python packages (use `--break-system-packages` if required by newer pip versions, or set up a `venv`):
+```bash
+pip3 install Flask gunicorn yt-dlp gallery-dl snapchat-dl
+```
+3. Start the Flask application:
+```bash
+python3 app.py
+```
 
-To extract Instagram posts, stories, or profiles, the hub needs a `cookies.txt` file from a throwaway Instagram account. You can easily upload this authentication file directly through the **Settings (⚙️)** menu in the Media Hub web UI.
+---
+
+## 🔧 Maintenance & Updating
+
+To keep your downloaders (like `yt-dlp` and `gallery-dl`) working as platforms change their code, use the built-in **Tools (Maintenance)** tab in the web UI. Alternatively, to update the Docker container:
+```bash
+docker-compose pull
+docker-compose up -d --build
+```
+
+---
