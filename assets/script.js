@@ -1,3 +1,5 @@
+console.log("🚀 Media Hub JS Loading...");
+
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
@@ -12,6 +14,7 @@ const AppState = {
   chanName: '',
   hadLink: false,
   noPreview: false,
+  isSlideshow: false, 
   clipPick: null,
   clipBusy: false,
   clipState: 'unknown',
@@ -69,9 +72,9 @@ const accentOr = c => ui.accent !== 'auto' && ACCENTS[ui.accent] ? ACCENTS[ui.ac
 function applyUi() {
   const d = document.documentElement; d.dataset.theme = ui.theme; d.dataset.size = ui.size; d.dataset.density = ui.density;
   const light = ui.theme === 'light' || (ui.theme === 'auto' && window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches);
-  $('themeMeta').content = light ? '#f1f4ff' : '#07080f';
+  if($('themeMeta')) $('themeMeta').content = light ? '#f1f4ff' : '#07080f';
   document.querySelectorAll('[data-ui]').forEach(b => { const [k, v] = b.dataset.ui.split(':'); b.classList.toggle('on', ui[k] === v); });
-  $('confettiOn').checked = ui.confetti === '1';
+  if($('confettiOn')) $('confettiOn').checked = ui.confetti === '1';
   setColor(accentOr((BRANDS[document.body.dataset.site] || BRANDS.other).color));
 }
 function setUi(k, v) { ui[k] = v; try { localStorage.setItem(UI_KEY, JSON.stringify(ui)); } catch {} applyUi(); }
@@ -83,12 +86,24 @@ function setBrand(key) {
 
 /* Initialization routines for dynamic DOM parts */
 function initDomInjects() {
-    $('accents').insertAdjacentHTML('beforeend', Object.entries(ACCENTS).map(([k, c]) => `<button class="sw" style="--c:${c}" data-ui="accent:${k}" data-setui-type="accent" data-setui-val="${k}" aria-label="Accent ${k}"></button>`).join(''));
-    $('platforms').innerHTML = ['tiktok','youtube','instagram','snapchat','x','facebook','reddit','twitch','vimeo'].map((k, i) => `<span class="plat" style="--c:${BRANDS[k].color};--i:${i}">${esc(BRANDS[k].name)}</span>`).join('');
+    // 1. Inject the accent colors
+    if($('accents')) {
+        $('accents').insertAdjacentHTML('beforeend', Object.entries(ACCENTS).map(([k, c]) => `<button class="sw" style="--c:${c}" data-ui="accent:${k}" aria-label="Accent ${k}"></button>`).join(''));
+    }
     
-    // Attach dynamically created accent UI handlers
-    document.querySelectorAll('[data-setui-type]').forEach(btn => {
-        btn.addEventListener('click', (e) => setUi(e.currentTarget.dataset.setuiType, e.currentTarget.dataset.setuiVal));
+    // 2. Inject the supported platforms
+    if($('platforms')) {
+        $('platforms').innerHTML = ['tiktok','youtube','instagram','snapchat','x','facebook','reddit','twitch','vimeo'].map((k, i) => `<span class="plat" style="--c:${BRANDS[k].color};--i:${i}">${esc(BRANDS[k].name)}</span>`).join('');
+    }
+    
+    // 3. FIX: Bind click events to ALL settings buttons (Theme, Accent, Size, Layout)
+    document.querySelectorAll('button[data-ui]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            const [k, v] = e.currentTarget.dataset.ui.split(':');
+            if (k && v) {
+                setUi(k, v);
+            }
+        });
     });
 }
 
@@ -101,6 +116,12 @@ const isInsta = u => /^https?:\/\/([a-z0-9-]+\.)*instagram\.com(\/|$|\?)/i.test(
 
 function classify(v) {
   if (!v) return null;
+
+  // Auto-repair broken TikTok links missing the domain
+  if (v.startsWith('@') && (v.includes('/video/') || v.includes('/photo/'))) {
+    v = 'https://www.tiktok.com/' + v;
+  }
+
   if (v[0] === '@') return USER_RE.test(v.slice(1)) ? {kind:'snap', user:v.slice(1)} : {kind:'bad'};
   if (/^https?:\/\//i.test(v) || v.includes('/') || KNOWN.test(v)) {
     const url = /^https?:\/\//i.test(v) ? v : 'https://' + v, m = url.match(SNAP_RE);
@@ -115,6 +136,9 @@ function setHint(t, err) { $('hint').textContent = t; $('hint').classList.remove
 function onUrlInput() {
   clearTimeout(AppState.timer); AppState.seq++;
   const v = $('url').value.trim();
+  
+  AppState.isSlideshow = false; 
+
   if (v && !AppState.hadLink) setOpts({});
   AppState.hadLink = !!v;
   $('clearBtn').style.display = v ? '' : 'none'; $('pasteBtn').style.display = v ? 'none' : '';
@@ -181,18 +205,36 @@ function videoPreview(url) {
     $('thumb').className = 'thumb loading'; setThumb('');
     $('ptitle').textContent = 'Loading details…'; $('chips').innerHTML = ''; $('dur').style.display = 'none';
     $('siteBadge').textContent = d.name; $('siteBadge').style.background = d.color;
+    
     const r = await post('/preview', {url});
     if (mine !== AppState.seq) return;
     if (!r.success) { $('preview').classList.remove('show'); AppState.noPreview = true; refreshOpts(); return setHint((r.error || 'No preview for this link.') + ' You can still try the download.', true); }
     if (r.gallery) return igCard(r, d);
+    
     setHint(''); $('siteBadge').textContent = r.site || d.name;
     AppState.chanUrl = r.channel_url || ''; AppState.chanName = r.uploader || '';
     if (AppState.chanUrl) { $('watchTxt').textContent = '👁 Auto-download new posts from ' + (AppState.chanName || 'this creator'); $('watchrow').classList.add('show'); }
-    $('thumb').className = 'thumb';
-    if (r.thumbnail) setThumb(r.thumbnail);
+    
+    // --- TIKTOK SLIDESHOW & THUMBNAIL FIX ---
+    if (!r.thumbnail) {
+      $('preview').classList.add('no-thumb');
+      $('thumb').style.display = 'none'; 
+    } else {
+      $('preview').classList.remove('no-thumb');
+      $('thumb').className = 'thumb';
+      $('thumb').style.display = '';
+      setThumb(r.thumbnail);
+    }
+
+    if (url.includes('/photo/') || r.type === 'slideshow' || r.type === 'image' || r.is_slideshow) {
+      AppState.isSlideshow = true;
+    }
+    // ----------------------------------------
+
     paintPreview(getOpts());
     $('ptitle').textContent = r.title;
     if (r.duration) { $('dur').textContent = fmtDur(r.duration); $('dur').style.display = ''; }
+    
     const chips = [];
     if (r.uploader) chips.push('👤 ' + r.uploader);
     if (r.duration) chips.push(`⏱ ${r.duration}s`);
@@ -201,6 +243,8 @@ function videoPreview(url) {
     chips.push('📁 ' + r.category + '/');
     if (r.ig) { chips.push(loginChip(r.ig.login)); chips.push('👁 Watching Instagram: not yet'); }
     $('chips').innerHTML = chips.map(chipHtml).join('');
+    
+    refreshOpts(); 
   }, 450);
 }
 
@@ -224,7 +268,7 @@ function pickClipLink(text) {
   if (m) { const url = m[0].replace(/[)\].,;!?]+$/, ''); return KNOWN.test(url) && isUrl(url) ? url : null; }
   return /^@[A-Za-z0-9._-]{3,32}$/.test(text) ? text : null;
 }
-function hideClip() { $('clipbar').classList.remove('show'); AppState.clipPick = null; }
+function hideClip() { if($('clipbar')) $('clipbar').classList.remove('show'); AppState.clipPick = null; }
 function rememberClip(v) { AppState.clipSeen = v; try { sessionStorage.setItem('hub_clip_seen', v); } catch {} }
 function dismissClip() { if (AppState.clipPick) rememberClip(AppState.clipPick); hideClip(); }
 function useClip() { if (!AppState.clipPick) return; const v = AppState.clipPick; rememberClip(v); hideClip(); $('url').value = v; onUrlInput(); toast('Link ready - press the big button'); }
@@ -299,17 +343,39 @@ const isCustom = o => Object.keys(OPT_DEFAULTS).some(k => String(o[k]) !== Strin
 
 function updateGo(o, lk) {
   if (!AppState.mode) return;
-  let label, sub;
-  if (AppState.mode === 'snap') { label = 'Download all stories'; sub = 'Public stories · saved in snapchat/'; }
-  else if (AppState.mode === 'ig') { label = 'Download from Instagram'; sub = 'Original quality · saved in instagram/'; }
+  let label, sub, icon = '';
+  
+  if (AppState.mode === 'snap') { 
+    label = 'Download all stories'; sub = 'Public stories · saved in snapchat/'; 
+  }
+  else if (AppState.mode === 'ig') { 
+    label = 'Download from Instagram'; sub = 'Original quality · saved in instagram/'; 
+  }
+  else if (AppState.isSlideshow) { 
+    label = 'Download Photos'; 
+    sub = 'Slideshow Archive (ZIP)'; 
+    icon = '🖼️'; 
+  }
   else {
     label = o.kind === 'audio' ? 'Download ' + o.audio_fmt.toUpperCase() : o.kind === 'image' ? 'Save the photo' : o.kind === 'gif' ? 'Make a GIF' : o.kind === 'sticker' ? 'Make a sticker' : 'Download';
     sub = o.kind === 'audio' ? `Audio only${['flac','wav'].includes(o.audio_fmt) ? '' : ' · ' + o.abr + ' kbps'}` : o.kind === 'image' ? 'Cover / photo as JPG'
         : o.kind === 'gif' ? 'Looping GIF, 480 px' : o.kind === 'sticker' ? 'WhatsApp-size WebP' : `${o.quality === 'best' ? 'Best quality' : o.quality + 'p'} · ${o.container.toUpperCase()}`;
+    
+    if (o.kind === 'audio') icon = '🎵';
+    if (o.kind === 'image') icon = '🖼️';
   }
+  
   if (o.fx_look !== 'none' && lk) sub += ' · ✨ ' + lk[1];
   if (AppState.noPreview && AppState.mode === 'video') sub = 'No preview - will try anyway · ' + sub;
-  $('goLabel').textContent = label; $('goSub').textContent = sub;
+  
+  $('goLabel').textContent = label; 
+  $('goSub').textContent = sub;
+  
+  if (icon) {
+      $('goIcon').textContent = icon;
+  } else {
+      $('goIcon').innerHTML = (BRANDS[document.body.dataset.site] || BRANDS.other).icon;
+  }
 }
 
 function refreshOpts() {
@@ -343,9 +409,9 @@ const LOOKS = [
   ['negative','Negative','linear-gradient(135deg,#0ff,#f0f)','invert(1)']];
 
 function initLooksAndPresets() {
-    $('looks').innerHTML = LOOKS.map(l => `<button class="look" data-look="${l[0]}"><i style="background:${l[2]}"></i>${l[1]}</button>`).join('');
+    if($('looks')) $('looks').innerHTML = LOOKS.map(l => `<button class="look" data-look="${l[0]}"><i style="background:${l[2]}"></i>${l[1]}</button>`).join('');
     document.querySelectorAll('.look').forEach(b => b.addEventListener('click', () => { document.querySelector('[data-o="fx_look"]').value = b.dataset.look; refreshOpts(); }));
-    $('presets').innerHTML = Object.entries(PRESETS).map(([k, v]) => `<button class="preset" data-preset="${k}">${v[0]}</button>`).join('');
+    if($('presets')) $('presets').innerHTML = Object.entries(PRESETS).map(([k, v]) => `<button class="preset" data-preset="${k}">${v[0]}</button>`).join('');
     document.querySelectorAll('.preset').forEach(b => b.addEventListener('click', (e) => applyPreset(e.currentTarget.dataset.preset)));
     document.querySelectorAll('#kindseg button').forEach(b => b.addEventListener('click', () => { curKind = b.dataset.kind; refreshOpts(); }));
 }
@@ -523,7 +589,6 @@ async function loadWatches() {
   const a = document.activeElement; if (a && a.classList && a.classList.contains('wsel') && $('wlist').contains(a)) return;
   lastWatchHtml = html; $('wlist').innerHTML = html;
   
-  // Attach dynamic handlers
   document.querySelectorAll('.wsel').forEach(el => el.addEventListener('change', e => setWInt(e.currentTarget.dataset.wid, e.currentTarget.value)));
   document.querySelectorAll('.wact-check').forEach(el => el.addEventListener('click', e => wact(e.currentTarget.dataset.wid, 'check')));
   document.querySelectorAll('.wact-toggle').forEach(el => el.addEventListener('click', e => wact(e.currentTarget.dataset.wid, 'toggle')));
@@ -582,7 +647,7 @@ window.addEventListener('offline', () => netState(false)); window.addEventListen
 
 async function loadVersion() {
   const v = await api('/version'); if (!v.success) return;
-  const row = (name, ok, okText, badText) => `<div class="vrow"><b>${name}<small>${ok ? '' : esc(badText)}</small></b><span class="${ok ? 'vok' : 'vbad'}">${ok ? okText : '✖ missing'}</span></div>`;
+  const row = (name, ok, okText, badText) => `<div class="vrow"><b>${name}<small>${ok ? '' : esc(badText)}</small></b><span class="${ok ? 'vok' : 'vok'}">${ok ? okText : '✖ missing'}</span></div>`;
   $('verlist').innerHTML = row('yt-dlp', true, '✔ ' + esc(v.ytdlp), '')
     + row('ffmpeg', v.ffmpeg, '✔ installed', 'Needed for effects, MP3, GIFs and stickers:  sudo apt install ffmpeg')
     + row('snapchat-dl', v.snapchat_dl, '✔ installed', 'Needed for Snapchat stories.')
@@ -644,78 +709,94 @@ async function saveIgCap() {
   toast(r.success ? 'Saved' : (r.message || 'Could not save')); if (r.success) $('igcap').value = r.ig_cap;
 }
 
-/* ---------- Setup Event Bindings ---------- */
-function initStaticEventBindings() {
-  // Header / Top
-  $('gearBtn').addEventListener('click', openSettings);
-  $('wrenchBtn').addEventListener('click', openMaint);
-  
-  // Smart Input
-  $('url').addEventListener('input', onUrlInput);
-  $('url').addEventListener('keydown', (e) => { if(e.key === 'Enter') go(); });
-  $('pasteBtn').addEventListener('click', pasteLink);
-  $('clearBtn').addEventListener('click', clearLink);
-  $('useClipBtn').addEventListener('click', useClip);
-  $('dismissClipBtn').addEventListener('click', dismissClip);
+/* ---------- Setup Event Bindings Safely ---------- */
+function safeBind(id, event, handler) {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener(event, handler);
+}
 
-  // Actions
-  $('goBtn').addEventListener('click', go);
-  $('custBtn').addEventListener('click', toggleCustom);
-  $('watchBtn').addEventListener('click', watchGo);
+function initStaticEventBindings() {
+  safeBind('gearBtn', 'click', openSettings);
+  safeBind('wrenchBtn', 'click', openMaint);
   
-  // Customization
-  $('custom').addEventListener('input', e => {
+  safeBind('url', 'input', onUrlInput);
+  const urlEl = document.getElementById('url');
+  if(urlEl) urlEl.addEventListener('keydown', (e) => { if(e.key === 'Enter') go(); });
+  
+  safeBind('pasteBtn', 'click', pasteLink);
+  safeBind('clearBtn', 'click', clearLink);
+  safeBind('useClipBtn', 'click', useClip);
+  safeBind('dismissClipBtn', 'click', dismissClip);
+  safeBind('goBtn', 'click', go);
+  safeBind('custBtn', 'click', toggleCustom);
+  safeBind('watchBtn', 'click', watchGo);
+  
+  const customEl = document.getElementById('custom');
+  if(customEl) customEl.addEventListener('input', e => {
       const t = e.target; if (t && t.type === 'checkbox' && t.dataset.o) document.querySelectorAll(`input[type=checkbox][data-o="${t.dataset.o}"]`).forEach(x => x.checked = t.checked);
       refreshOpts();
   });
-  $('cmp').addEventListener('input', (e) => onCmp(e.target.value));
-  $('ptitle').addEventListener('click', (e) => e.currentTarget.classList.toggle('open'));
-  $('resetPresetBtn').addEventListener('click', () => applyPreset('reset'));
   
-  // Batch
-  $('toggleBatchBtn').addEventListener('click', toggleBatch);
-  $('startBatchBtn').addEventListener('click', startBatch);
-
-  // Modals & Settings
-  $('cancelBtn').addEventListener('click', cancelJob);
-  $('runBackgroundBtn').addEventListener('click', hideProgress);
-  $('closeSettingsBtn').addEventListener('click', closeSettings);
-  $('smodalDoneBtn').addEventListener('click', closeSettings);
-  $('smodal').addEventListener('click', (e) => { if(e.target === $('smodal')) closeSettings(); });
+  safeBind('cmp', 'input', (e) => onCmp(e.target.value));
+  safeBind('ptitle', 'click', (e) => e.currentTarget.classList.toggle('open'));
+  safeBind('resetPresetBtn', 'click', () => applyPreset('reset'));
   
-  $('confettiOn').addEventListener('change', (e) => setUi('confetti', e.target.checked ? '1' : '0'));
-  $('saveNtfyBtn').addEventListener('click', saveSettings);
-  $('testNtfyBtn').addEventListener('click', testSettings);
-  $('creatorFolders').addEventListener('change', setCreatorFolders);
-  $('igfile').addEventListener('change', igPickFile);
-  $('igSave').addEventListener('click', saveIg);
-  $('igRemove').addEventListener('click', removeIg);
-  $('igcap').addEventListener('change', saveIgCap);
-  $('clipOn').addEventListener('change', setClipOn);
+  safeBind('toggleBatchBtn', 'click', toggleBatch);
+  safeBind('startBatchBtn', 'click', startBatch);
+  safeBind('cancelBtn', 'click', cancelJob);
+  safeBind('runBackgroundBtn', 'click', hideProgress);
+  safeBind('closeSettingsBtn', 'click', closeSettings);
+  safeBind('smodalDoneBtn', 'click', closeSettings);
+  
+  const smodalEl = document.getElementById('smodal');
+  if(smodalEl) smodalEl.addEventListener('click', (e) => { if(e.target === smodalEl) closeSettings(); });
+  
+  safeBind('confettiOn', 'change', (e) => setUi('confetti', e.target.checked ? '1' : '0'));
+  safeBind('saveNtfyBtn', 'click', saveSettings);
+  safeBind('testNtfyBtn', 'click', testSettings);
+  safeBind('creatorFolders', 'change', setCreatorFolders);
+  safeBind('igfile', 'change', igPickFile);
+  safeBind('igSave', 'click', saveIg);
+  safeBind('igRemove', 'click', removeIg);
+  safeBind('igcap', 'change', saveIgCap);
+  safeBind('clipOn', 'change', setClipOn);
 
-  // Maintenance Modal
-  $('mmodal').addEventListener('click', (e) => { if(e.target === $('mmodal')) closeMaint(); });
-  $('updBtn').addEventListener('click', updateYtdlp);
-  $('rstBtn').addEventListener('click', restartApp);
-  $('mmodalCloseBtn').addEventListener('click', closeMaint);
+  const mmodalEl = document.getElementById('mmodal');
+  if(mmodalEl) mmodalEl.addEventListener('click', (e) => { if(e.target === mmodalEl) closeMaint(); });
+  
+  safeBind('updBtn', 'click', updateYtdlp);
+  safeBind('rstBtn', 'click', restartApp);
+  safeBind('mmodalCloseBtn', 'click', closeMaint);
 
-  // Bottom Tabs
-  document.querySelector('[data-tab="home"]').addEventListener('click', () => setTab('home'));
-  document.querySelector('[data-tab="watch"]').addEventListener('click', () => setTab('watch'));
-  $('navSettingsBtn').addEventListener('click', openSettings);
-  $('navMaintBtn').addEventListener('click', openMaint);
+  // Safely grab the tabs from nav
+  const tabHome = document.querySelector('nav.tabbar [data-tab="home"]');
+  const tabWatch = document.querySelector('nav.tabbar [data-tab="watch"]');
+  if(tabHome) tabHome.addEventListener('click', () => setTab('home'));
+  if(tabWatch) tabWatch.addEventListener('click', () => setTab('watch'));
+  
+  safeBind('navSettingsBtn', 'click', openSettings);
+  safeBind('navMaintBtn', 'click', openMaint);
 
-  // Keyboard Modal
-  $('kmodal').addEventListener('click', (e) => { if(e.target === $('kmodal')) closeKeys(); });
-  $('closeKeysBtn').addEventListener('click', closeKeys);
+  const kmodalEl = document.getElementById('kmodal');
+  if(kmodalEl) kmodalEl.addEventListener('click', (e) => { if(e.target === kmodalEl) closeKeys(); });
+  safeBind('closeKeysBtn', 'click', closeKeys);
 }
 
-/* ---------- Bootup ---------- */
-applyUi();
-initDomInjects();
-initLooksAndPresets();
-initStaticEventBindings();
-loadSettings();
-setOpts({});
-watch(); 
-setTimeout(checkClipboard, 700);
+/* ---------- Safe Bootup ---------- */
+function bootApp() {
+    applyUi();
+    initDomInjects();
+    initLooksAndPresets();
+    initStaticEventBindings();
+    loadSettings();
+    setOpts({});
+    watch(); 
+    setTimeout(checkClipboard, 700);
+    console.log("🚀 Media Hub Boot Sequence Complete!");
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bootApp);
+} else {
+    bootApp();
+}

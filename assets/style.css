@@ -5,11 +5,29 @@
           --ok:#34d399; --err:#fb7185; --pc:#8b5cf6; --r:20px; transition:--pc .6s ease;
           --grad:linear-gradient(135deg,#8b5cf6 0%,#5b8def 55%,#22d3ee 100%); --ease:cubic-bezier(.2,.8,.2,1);
           --field:var(--field); --field2:var(--field2); --modal:#13152b; --toast:var(--toast); --top-bg:var(--top-bg); --shadow:rgba(0,0,0,.45); --cs:dark; --fs:16px; }
+          /* Fix for invisible text inside dropdown menus */
+        select option {
+    background-color: var(--modal);
+    color: var(--text);
+        }
+  
   /* Light theme */
   html[data-theme="light"] { --bg:#f1f4ff; --card:rgba(255,255,255,.8); --card2:rgba(30,36,90,.07); --line:rgba(30,36,90,.14); --text:#14172e; --mute:#566087; --cyan:#0b6f95;
           --ok:#087a54; --err:#c42a45; --amber:#8a5a00; --field:rgba(255,255,255,.96); --field2:rgba(30,36,90,.05); --modal:#ffffff; --toast:#ffffff; --top-bg:rgba(241,244,255,.8); --shadow:rgba(40,50,120,.18); --cs:light; }
+  
   @media (prefers-color-scheme:light) { html[data-theme="auto"] { --bg:#f1f4ff; --card:rgba(255,255,255,.8); --card2:rgba(30,36,90,.07); --line:rgba(30,36,90,.14); --text:#14172e; --mute:#566087; --cyan:#0b6f95;
           --ok:#087a54; --err:#c42a45; --amber:#8a5a00; --field:rgba(255,255,255,.96); --field2:rgba(30,36,90,.05); --modal:#ffffff; --toast:#ffffff; --top-bg:rgba(241,244,255,.8); --shadow:rgba(40,50,120,.18); --cs:light; } }
+
+  /* Smoothly fade the global accent color (--pc) based on the pasted link */
+  body[data-site="youtube"] { --pc: #ff1f3d; }
+  body[data-site="tiktok"] { --pc: #25f4ee; } /* TikTok Cyan */
+  body[data-site="snapchat"] { --pc: #fffc00; }
+  body[data-site="instagram"] { --pc: #d62976; }
+  body[data-site="facebook"] { --pc: #1877f2; }
+  body[data-site="reddit"] { --pc: #ff5a1f; }
+  body[data-site="twitch"] { --pc: #9146ff; }
+  body[data-site="x"] { --pc: #888888; } /* Neutral for X */
+
   html[data-size="s"] { --fs:14.5px; } html[data-size="l"] { --fs:18px; } html[data-size="xl"] { --fs:20px; }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html { scroll-behavior:smooth; font-size:var(--fs); }
@@ -82,6 +100,23 @@
   /* ---------- preview cards ---------- */
   .preview { display:none; margin-top:18px; text-align:left; background:var(--card); border:1px solid var(--line); border-radius:var(--r); overflow:hidden; backdrop-filter:blur(10px); box-shadow:0 20px 60px var(--shadow); }
   .preview.show { display:block; animation:rise .45s var(--ease); } @keyframes rise { from { opacity:0; transform:translateY(18px) scale(.98); } to { opacity:1; transform:none; } }
+
+  /* Gracefully collapse the preview card when there is no thumbnail */
+  .preview.no-thumb .thumb {
+    display: none !important;
+  }
+  .preview.no-thumb {
+    padding-top: 10px;
+    text-align: center;
+    border-style: dashed; /* Optional: Makes it look intentionally file-like */
+  }
+  .preview.no-thumb .pinfo {
+    padding-top: 8px;
+  }
+  .preview.no-thumb .chips {
+    justify-content: center;
+  }
+
   .thumb { position:relative; aspect-ratio:16/9; background:var(--card2); overflow:hidden; }
   .thumb.loading::after { content:""; position:absolute; inset:0; background:linear-gradient(100deg,transparent 20%,rgba(255,255,255,.1) 50%,transparent 80%); animation:skel 1.3s infinite; }
   @keyframes skel { from { transform:translateX(-100%); } to { transform:translateX(100%); } }

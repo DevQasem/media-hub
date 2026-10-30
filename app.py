@@ -92,6 +92,28 @@ jobs, cancels = {}, {}
 lock = threading.Lock()
 JOBS_FILE = DATA_DIR / "jobs.json"
 
+def run_snapchat_watchlist(username):
+    # Set the path to where this user's stories are saved
+    user_folder = os.path.join("hub-data", "snapchat", username)
+    os.makedirs(user_folder, exist_ok=True)
+    
+    # 1. Take a snapshot of the files BEFORE the download runs
+    existing_files = set(os.listdir(user_folder))
+    
+    # 2. Run snapchat-dl (it will download everything currently live)
+    # The -P flag ensures it saves into the correct directory structure
+    subprocess.run(["snapchat-dl", username, "-P", "hub-data/snapchat"], check=False)
+    
+    # 3. Take a snapshot of the files AFTER the download finishes
+    current_files = set(os.listdir(user_folder))
+    
+    # 4. Math: Subtract the old files from the new files
+    new_files = current_files - existing_files
+    
+    # 5. Only return the count of TRULY new files
+    total_new_stories = len(new_files)
+    
+    return total_new_stories
 
 def save_jobs():
     """Write job state to disk so results survive a server restart."""
@@ -375,10 +397,10 @@ def cookie_copy():
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
-
 def cookie_ctx(use: bool):
     return cookie_copy() if use else nullcontext(None)
 
+# ---- Instagram link types ----------------------------------------------------
 
 # ---- Instagram link types ----------------------------------------------------
 _IG_RESERVED = {"explore", "accounts", "direct", "about", "legal", "developer", "web", "challenge", "emails",
@@ -456,7 +478,7 @@ DEFAULT_OPTS = {
     "date_after": "", "date_before": "",                        # YYYY-MM-DD
     "min_dur": "", "max_dur": "", "min_views": "", "max_mb": "",
     "title_has": "", "title_not": "",
-    "force": False,                                              # re-download even if the file exists
+    "force": False,                                             # re-download even if the file exists
     # effects (ffmpeg, applied after the download - like the Telegram bots)
     "fx_look": "none", "fx_blur": "none", "fx_sharpen": False, "fx_mirror": "none",
     "fx_rotate": "0", "fx_speed": "1", "fx_crop": "none", "fx_scale": "none",
@@ -517,7 +539,7 @@ def sanitize_options(raw):
             o[k] = _WORDS_RE.sub("", str(v)).strip()[:60]
         elif k in ("date_after", "date_before"):
             o[k] = str(v) if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(v)) else ""
-        else:                                         # clip times + numeric filters
+        else:                                          # clip times + numeric filters
             o[k] = str(v).strip()[:12]
     return o
 
@@ -730,11 +752,11 @@ def apply_effects(folder, rels, o, job):
         src = folder / rel
         ext = src.suffix.lower()
         if rel not in media:
-            out.append(rel); continue                       # subtitles, audio, covers: leave alone
+            out.append(rel); continue                        # subtitles, audio, covers: leave alone
         if cancel is not None and cancel.is_set():
             raise DownloadCancelled("Cancelled by user")
         is_vid = ext in VIDEO_EXT
-        if not is_vid and not vf:                           # nothing to do to a photo (e.g. only "speed")
+        if not is_vid and not vf:                            # nothing to do to a photo (e.g. only "speed")
             out.append(rel); continue
         update(job, message=f"Applying effects {i + 1}/{len(media)}…", progress=min(90 + i, 98))
         suffix = ".mp4" if is_vid else ext
@@ -781,14 +803,14 @@ def make_animation(folder, rels, o, job):
     ff, cancel = _need_ffmpeg(), job_cancel(job)
     vf, _af, tag = fx_plan(o)
     gif = o["kind"] == "gif"
-    cap = 15 if (o["clip_start"] or o["clip_end"]) else (8 if gif else 6)       # seconds
+    cap = 15 if (o["clip_start"] or o["clip_end"]) else (8 if gif else 6)        # seconds
     out, warns = [], []
     media = [r for r in rels if r.lower().endswith(VIDEO_EXT + IMG_EXT)]
     for i, rel in enumerate(rels):
         src, ext = folder / rel, Path(rel).suffix.lower()
         is_vid = ext in VIDEO_EXT
         if rel not in media or (gif and not is_vid):
-            out.append(rel); continue                       # photos can't become GIFs; leave other files
+            out.append(rel); continue                        # photos can't become GIFs; leave other files
         if cancel is not None and cancel.is_set():
             raise DownloadCancelled("Cancelled by user")
         update(job, message=f"Making {o['kind']} {i + 1}/{len(media)}…", progress=min(90 + i, 98))
@@ -801,7 +823,7 @@ def make_animation(folder, rels, o, job):
         elif is_vid:
             attempts = [(15, 55, 0.5), (12, 40, 0.5), (10, 28, 0.5), (8, 18, 0.5)]   # fps, quality, max MB
         else:
-            attempts = [(1, 80, 0.1), (1, 60, 0.1), (1, 40, 0.1), (1, 25, 0.1)]       # static sticker < 100 KB
+            attempts = [(1, 80, 0.1), (1, 60, 0.1), (1, 40, 0.1), (1, 25, 0.1)]        # static sticker < 100 KB
         ok = False
         for fps, size_or_q, limit_mb in attempts:
             if gif:
@@ -971,6 +993,16 @@ def ytdlp_worker(job, url, category, options, cancel):
         finish_err(job, last_line(exc, "Cancelled by user"))
     except Exception as exc:  # noqa: BLE001
         msg = last_line(exc)
+        
+        # --- NEW TIKTOK SLIDESHOW FALLBACK ---
+        if category == "tiktok" and shutil.which("gallery-dl"):
+            app.logger.info("yt-dlp failed on %s. Falling back to gallery-dl for possible slideshow...", url)
+            update(job, message="Video failed, trying gallery-dl for images...")
+            exe = shutil.which("gallery-dl")
+            cmd = [exe, "-d", str(BASE_DIR), url]
+            return _gallery_run(job, cmd, folder, o, cancel, False, "", None)
+        # -------------------------------------
+
         if type(exc).__name__ == "DownloadError":
             app.logger.warning("yt-dlp could not download %s: %s", url, msg)
         else:
@@ -1119,7 +1151,7 @@ def _snapchat_run(job, username, cancel, options=None, only=None):
     ids = info["ids"] if info else []
     log = [f"[hub] counted {expected} stories on the profile page"] if expected else []
     all_ids, total = list(ids), expected
-    if only is not None:                              # "download only the stories I ticked"
+    if only is not None:                                # "download only the stories I ticked"
         if not info or not ids:
             return finish_err(job, "I could not read the story list right now, so single stories cannot be picked. "
                                    "Try again in a moment, or download all.")
@@ -1188,7 +1220,7 @@ def _snapchat_run(job, username, cancel, options=None, only=None):
                 pass
             now = time.time()
 
-            cur = scan_user(folder, username)            # one scan of THIS user's folder per tick
+            cur = scan_user(folder, username)             # one scan of THIS user's folder per tick
             sig = (len(cur), sum(s for _, s in cur.values()))
             if sig != last_sig:
                 last_sig, last, active, last_any = sig, now, True, now
@@ -1462,6 +1494,18 @@ def preview():
         return jsonify(success=False, error="No URL provided"), 400
     if not valid_http_url(url):
         return jsonify(success=False, error="That doesn't look like a valid link."), 400
+
+    # --- TIKTOK PHOTO DETECTOR ---
+    if detect_category(url) == "tiktok" and "/photo/" in url:
+        user = url.split("@")[1].split("/")[0] if "@" in url else "TikTok User"
+        # We removed gallery=True here so the UI stays in TikTok mode!
+        return jsonify(
+            success=True, title=f"TikTok Photo Slideshow", 
+            thumbnail="", uploader=user, duration=None, views=None, 
+            upload_date=None, site="TikTok", category="tiktok", channel_url=""
+        )
+    # -----------------------------
+
     igx = None
     if is_instagram(url):
         igx = instagram_info(url)
@@ -1508,7 +1552,7 @@ def snap_info():
 
 STORY_CACHE, THUMB_CACHE = {}, {}
 THUMB_HOSTS = ("sc-cdn.net", "snapchat.com", "snap.com", "snapcdn.net", "sc-gw.com")     # thumbnails are only fetched from Snapchat's own hosts
-THUMB_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}                    # never SVG/HTML: nothing scriptable gets through
+THUMB_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}                     # never SVG/HTML: nothing scriptable gets through
 
 
 def _fetch_bytes(url, limit=4 * 1024 * 1024, timeout=10):
