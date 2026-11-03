@@ -14,18 +14,23 @@ const AppState = {
   chanName: '',
   hadLink: false,
   noPreview: false,
-  isSlideshow: false, 
+  isSlideshow: false,
   clipPick: null,
   clipBusy: false,
   clipState: 'unknown',
-  clipSeen: sessionStorage.getItem('hub_clip_seen') || '',
+  clipSeen: (() => { try { return sessionStorage.getItem('hub_clip_seen') || ''; } catch { return ''; } })(),
   lastRun: null,
   viewing: null,
   results: [],
   resultOpen: false,
   wt: null,
+  watching: false,
   lastRunning: []
 };
+
+/* one dot on the Settings buttons: shows when the Instagram login expired or a server tool is missing */
+const SX = {igExp:false, miss:false, pane:'look'};
+function updDots() { document.querySelectorAll('[data-sdot]').forEach(el => el.classList.toggle('show', SX.igExp || SX.miss)); }
 
 /* offline banner */
 let netFails = 0;
@@ -90,13 +95,13 @@ function initDomInjects() {
     if($('accents')) {
         $('accents').insertAdjacentHTML('beforeend', Object.entries(ACCENTS).map(([k, c]) => `<button class="sw" style="--c:${c}" data-ui="accent:${k}" aria-label="Accent ${k}"></button>`).join(''));
     }
-    
+
     // 2. Inject the supported platforms
     if($('platforms')) {
         $('platforms').innerHTML = ['tiktok','youtube','instagram','snapchat','x','facebook','reddit','twitch','vimeo'].map((k, i) => `<span class="plat" style="--c:${BRANDS[k].color};--i:${i}">${esc(BRANDS[k].name)}</span>`).join('');
     }
-    
-    // 3. FIX: Bind click events to ALL settings buttons (Theme, Accent, Size, Layout)
+
+    // 3. Bind click events to ALL settings buttons (Theme, Accent, Size, Layout)
     document.querySelectorAll('button[data-ui]').forEach(btn => {
         btn.addEventListener('click', (e) => {
             const [k, v] = e.currentTarget.dataset.ui.split(':');
@@ -109,7 +114,7 @@ function initDomInjects() {
 
 /* ---------- smart box: video links AND Snapchat ---------- */
 const SNAP_RE = /(?:story\.snapchat\.com\/(?:s\/|@)|snapchat\.com\/(?:add\/|@|s\/))@?([A-Za-z0-9._-]{3,32})/i;
-const KNOWN = /youtu|tiktok|instagram|twitter|x\.com|facebook|fb\.watch|reddit|twitch|snapchat|vimeo|dailymotion/i;
+const KNOWN = /youtu|tiktok|instagram|twitter|(?:^|[./])x\.com|facebook|fb\.watch|reddit|twitch|snapchat|vimeo|dailymotion/i;
 const USER_RE = /^[A-Za-z0-9._-]{3,32}$/;
 const isUrl = u => /^https?:\/\/\S+\.\S+/i.test(u);
 const isInsta = u => /^https?:\/\/([a-z0-9-]+\.)*instagram\.com(\/|$|\?)/i.test(u);
@@ -136,8 +141,8 @@ function setHint(t, err) { $('hint').textContent = t; $('hint').classList.remove
 function onUrlInput() {
   clearTimeout(AppState.timer); AppState.seq++;
   const v = $('url').value.trim();
-  
-  AppState.isSlideshow = false; 
+
+  AppState.isSlideshow = false;
 
   if (v && !AppState.hadLink) setOpts({});
   AppState.hadLink = !!v;
@@ -169,28 +174,36 @@ function snapPreview(user) {
 const loginChip = l => !l || !l.saved ? ['🔑 No login saved', 'bad'] : l.session_expired ? ['🔑 Login expired', 'bad'] : !l.has_session ? ['🔑 Login has no sessionid', 'bad'] : ['🔑 Login saved ✔', 'ok'];
 const chipHtml = c => { const t = Array.isArray(c) ? c : [c, '']; return `<span class="chip ${t[1]}">${esc(t[0])}</span>`; };
 
-function openSettings() { $('smodal').classList.add('open'); loadIg(); }
+function sxPane(n) {
+  SX.pane = n;
+  document.querySelectorAll('#sxnav [data-sec]').forEach(b => b.classList.toggle('on', b.dataset.sec === n));
+  document.querySelectorAll('.sxpane').forEach(s => s.classList.toggle('on', s.dataset.pane === n));
+  if (n === 'tools') loadVersion(); if (n === 'ig') loadIg();
+}
+function openSettings(sec) { $('smodal').classList.add('open'); sxPane(typeof sec === 'string' ? sec : SX.pane); }
 function setTab(t) {
   document.body.dataset.tab = t; $('tabbar').style.setProperty('--ti', t === 'watch' ? 1 : 0);
   document.querySelectorAll('.tabbar [data-tab]').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+  document.querySelectorAll('#rail [data-nav]').forEach(b => b.classList.toggle('on', b.dataset.nav === t));
   if (window.scrollTo) window.scrollTo({top:0, behavior:'smooth'});
 }
 function closeKeys() { $('kmodal').classList.remove('open'); }
 function focusUrl() { setTab('home'); $('url').focus(); if ($('url').select) $('url').select(); }
 function closeSettings() { $('smodal').classList.remove('open'); }
-function openIgSettings() { openSettings(); setTimeout(() => $('igSection').scrollIntoView({behavior:'smooth', block:'start'}), 120); }
+function openIgSettings() { openSettings('ig'); }
 
 function igCard(r, d) {
   AppState.mode = 'ig'; $('preview').classList.remove('show'); $('watchrow').classList.remove('show'); setHint(''); setBrand('instagram');
-  const kinds = {post:'📸 Post (photos / carousel)', stories:'📖 Stories', highlight:'⭐ Highlight', profile:'👤 Whole profile'}, ig = r.ig || {};
+  const kinds = {post:'📸 Post (photos / carousel)', stories:'📖 All stories of this user', highlight:'⭐ Highlight', profile:'👤 Whole profile'}, ig = r.ig || {};
   $('igtitle').textContent = r.title;
+  $('igwhatrow').style.display = ig.kind === 'profile' ? '' : 'none';
   $('igchips').innerHTML = [kinds[ig.kind] || 'Instagram', '📁 instagram/', ig.gallery_dl ? ['🧰 gallery-dl ✔', 'ok'] : ['🧰 gallery-dl missing ✖', 'bad'], loginChip(ig.login)].map(chipHtml).join('');
   const bad = [];
   if (!ig.gallery_dl) bad.push('gallery-dl is not installed on the server (see the 🔧 Maintenance button).');
   if (!ig.login || !ig.login.saved || ig.login.session_expired || !ig.login.has_session) bad.push('Instagram needs your login: open Settings → Instagram login.');
   $('ignote').innerHTML = (bad.length ? esc(bad.join(' ')) + ' <button class="linkbtn" style="padding:0" id="ignoteSettingsBtn">Open Settings</button><br>' : '')
     + (ig.kind === 'profile' ? esc(`Takes the first ${ig.cap || 30} items. For a different amount, open Customize → More options → Items and type a range such as 1-60.`) : '');
-  
+
   if ($('ignoteSettingsBtn')) $('ignoteSettingsBtn').addEventListener('click', openIgSettings);
 
   $('igbox').classList.add('show'); $('actions').classList.add('show'); refreshOpts();
@@ -205,20 +218,20 @@ function videoPreview(url) {
     $('thumb').className = 'thumb loading'; setThumb('');
     $('ptitle').textContent = 'Loading details…'; $('chips').innerHTML = ''; $('dur').style.display = 'none';
     $('siteBadge').textContent = d.name; $('siteBadge').style.background = d.color;
-    
+
     const r = await post('/preview', {url});
     if (mine !== AppState.seq) return;
     if (!r.success) { $('preview').classList.remove('show'); AppState.noPreview = true; refreshOpts(); return setHint((r.error || 'No preview for this link.') + ' You can still try the download.', true); }
     if (r.gallery) return igCard(r, d);
-    
+
     setHint(''); $('siteBadge').textContent = r.site || d.name;
     AppState.chanUrl = r.channel_url || ''; AppState.chanName = r.uploader || '';
     if (AppState.chanUrl) { $('watchTxt').textContent = '👁 Auto-download new posts from ' + (AppState.chanName || 'this creator'); $('watchrow').classList.add('show'); }
-    
+
     // --- TIKTOK SLIDESHOW & THUMBNAIL FIX ---
     if (!r.thumbnail) {
       $('preview').classList.add('no-thumb');
-      $('thumb').style.display = 'none'; 
+      $('thumb').style.display = 'none';
     } else {
       $('preview').classList.remove('no-thumb');
       $('thumb').className = 'thumb';
@@ -234,7 +247,7 @@ function videoPreview(url) {
     paintPreview(getOpts());
     $('ptitle').textContent = r.title;
     if (r.duration) { $('dur').textContent = fmtDur(r.duration); $('dur').style.display = ''; }
-    
+
     const chips = [];
     if (r.uploader) chips.push('👤 ' + r.uploader);
     if (r.duration) chips.push(`⏱ ${r.duration}s`);
@@ -243,17 +256,17 @@ function videoPreview(url) {
     chips.push('📁 ' + r.category + '/');
     if (r.ig) { chips.push(loginChip(r.ig.login)); chips.push('👁 Watching Instagram: not yet'); }
     $('chips').innerHTML = chips.map(chipHtml).join('');
-    
-    refreshOpts(); 
+
+    refreshOpts();
   }, 450);
 }
 
 function go() { if (AppState.mode === 'snap') startSnap(); else if (AppState.mode === 'video' || AppState.mode === 'ig') startVideo(false); }
 function fmtDur(s) { const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = Math.floor(s % 60); return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); }
 
-async function pasteLink() { 
-  try { $('url').value = (await navigator.clipboard.readText()).trim(); onUrlInput(); } 
-  catch { toast('Your browser blocks the Paste button here - long-press the box and paste instead'); $('url').focus(); } 
+async function pasteLink() {
+  try { $('url').value = (await navigator.clipboard.readText()).trim(); onUrlInput(); }
+  catch { toast('Your browser blocks the Paste button here - long-press the box and paste instead'); $('url').focus(); }
 }
 
 function clearLink() { $('url').value = ''; onUrlInput(); $('url').focus(); }
@@ -307,7 +320,7 @@ window.addEventListener('focus', () => setTimeout(checkClipboard, 300));
 const OPT_DEFAULTS = {kind:'video', quality:'best', container:'mp4', compat:false, audio_fmt:'mp3', abr:'192', subs:false, autosubs:false, sub_langs:'en',
   embed_subs:false, thumb:false, embed_thumb:false, meta:false, sponsor:false, desc:false, playlist:'single', items:'', clip_start:'', clip_end:'',
   date_after:'', date_before:'', min_dur:'', max_dur:'', min_views:'', max_mb:'', title_has:'', title_not:'',
-  force:false, fx_look:'none', fx_blur:'none', fx_sharpen:false, fx_mirror:'none', fx_rotate:'0', fx_speed:'1', fx_crop:'none', fx_scale:'none', fx_mute:false, fx_keep:true};
+  force:false, name:'', ig_what:'posts', fx_look:'none', fx_blur:'none', fx_sharpen:false, fx_mirror:'none', fx_rotate:'0', fx_speed:'1', fx_crop:'none', fx_scale:'none', fx_mute:false, fx_keep:true};
 const PRESETS = {
   best:  ['🎬 Best video', {}],
   phone: ['📱 Phone friendly', {quality:'1080', compat:true}],
@@ -339,38 +352,38 @@ function setOpts(p) {
 function applyPreset(name) {
   const cur = getOpts(), keep = {}; Object.keys(cur).filter(k => k.startsWith('fx_')).forEach(k => keep[k] = cur[k]);
   setOpts(name === 'reset' ? {} : Object.assign(keep, PRESETS[name][1])); toast(name === 'reset' ? 'Back to the normal download' : 'Preset: ' + PRESETS[name][0]); }
-const isCustom = o => Object.keys(OPT_DEFAULTS).some(k => String(o[k]) !== String(OPT_DEFAULTS[k]));
+const isCustom = o => Object.keys(OPT_DEFAULTS).some(k => k !== 'name' && String(o[k]) !== String(OPT_DEFAULTS[k]));
 
 function updateGo(o, lk) {
   if (!AppState.mode) return;
   let label, sub, icon = '';
-  
-  if (AppState.mode === 'snap') { 
-    label = 'Download all stories'; sub = 'Public stories · saved in snapchat/'; 
+
+  if (AppState.mode === 'snap') {
+    label = 'Download all stories'; sub = 'Public stories · saved in snapchat/';
   }
-  else if (AppState.mode === 'ig') { 
-    label = 'Download from Instagram'; sub = 'Original quality · saved in instagram/'; 
+  else if (AppState.mode === 'ig') {
+    label = 'Download from Instagram'; sub = 'Original quality · saved in instagram/';
   }
-  else if (AppState.isSlideshow) { 
-    label = 'Download Photos'; 
-    sub = 'Slideshow Archive (ZIP)'; 
-    icon = '🖼️'; 
+  else if (AppState.isSlideshow) {
+    label = 'Download Photos';
+    sub = 'Slideshow Archive (ZIP)';
+    icon = '🖼️';
   }
   else {
     label = o.kind === 'audio' ? 'Download ' + o.audio_fmt.toUpperCase() : o.kind === 'image' ? 'Save the photo' : o.kind === 'gif' ? 'Make a GIF' : o.kind === 'sticker' ? 'Make a sticker' : 'Download';
     sub = o.kind === 'audio' ? `Audio only${['flac','wav'].includes(o.audio_fmt) ? '' : ' · ' + o.abr + ' kbps'}` : o.kind === 'image' ? 'Cover / photo as JPG'
         : o.kind === 'gif' ? 'Looping GIF, 480 px' : o.kind === 'sticker' ? 'WhatsApp-size WebP' : `${o.quality === 'best' ? 'Best quality' : o.quality + 'p'} · ${o.container.toUpperCase()}`;
-    
+
     if (o.kind === 'audio') icon = '🎵';
     if (o.kind === 'image') icon = '🖼️';
   }
-  
+
   if (o.fx_look !== 'none' && lk) sub += ' · ✨ ' + lk[1];
   if (AppState.noPreview && AppState.mode === 'video') sub = 'No preview - will try anyway · ' + sub;
-  
-  $('goLabel').textContent = label; 
+
+  $('goLabel').textContent = label;
   $('goSub').textContent = sub;
-  
+
   if (icon) {
       $('goIcon').textContent = icon;
   } else {
@@ -441,9 +454,9 @@ function startVideo(audio) {
   run({action_type:'url', target:AppState.videoUrl, options}, AppState.mode === 'ig' ? 'Fetching from Instagram…' : options.kind === 'audio' ? 'Extracting audio…' : 'Downloading…');
 }
 
-function startSnap() { 
-  if (AppState.mode !== 'snap') return toast('Enter a Snapchat username or link'); 
-  run({action_type:'snapchat', target:AppState.snapUser, options:getOpts()}, 'Fetching Snapchat stories…'); 
+function startSnap() {
+  if (AppState.mode !== 'snap') return toast('Enter a Snapchat username or link');
+  run({action_type:'snapchat', target:AppState.snapUser, options:getOpts()}, 'Fetching Snapchat stories…');
 }
 
 async function run(payload, title) {
@@ -451,6 +464,7 @@ async function run(payload, title) {
   const r = await post('/download-action', payload);
   if (!r.success) return showResult({status:'error', message:r.message || 'Could not start the download.', files:[]});
   AppState.viewing = r.job_id; setTracked([...tracked(), r.job_id]); watch();
+  if ($('fname')) $('fname').value = '';          // the name was for this download only
 }
 function openProgress(title) {
   AppState.resultOpen = false; $('modal').classList.add('open'); $('m-load').style.display = ''; $('m-res').style.display = 'none';
@@ -461,8 +475,14 @@ function updateProgress(j) { setRing(j.progress); $('bar').style.width = j.progr
 function hideProgress() { $('modal').classList.remove('open'); AppState.viewing = null; toast('Running in the background - a popup will tell you when it is done'); }
 async function cancelJob() { if (!AppState.viewing) return; $('cancelBtn').disabled = true; $('lmsg').textContent = 'Cancelling…'; await api('/cancel/' + AppState.viewing, {method:'POST'}); }
 
+/* One polling loop only: watch() is guarded, watchBody() does one poll. */
 async function watch() {
+  if (AppState.watching) return;
+  AppState.watching = true;
   clearTimeout(AppState.wt);
+  try { await watchBody(); } finally { AppState.watching = false; AppState.wt = setTimeout(watch, 1500); }
+}
+async function watchBody() {
   const ids = tracked(), gids = groups(), all = [...new Set([...ids, ...gids.flat()])];
   if (!all.length) { renderStrip([]); return; }
   const d = await api('/jobs?ids=' + all.map(encodeURIComponent).join(','));
@@ -470,7 +490,7 @@ async function watch() {
     const byId = Object.fromEntries(d.jobs.map(j => [j.id, j])), keep = [], running = [], gset = new Set(gids.flat());
     for (const id of ids) {
       const j = byId[id]; if (!j) continue;
-      if (j.status === 'done' || j.status === 'error') { if (!gset.has(id)) AppState.results.push(j); }
+      if (j.status === 'done' || j.status === 'error') { if (!gset.has(id) && !AppState.results.some(x => x.id === j.id)) AppState.results.push(j); }
       else { keep.push(id); running.push(j); if (id === AppState.viewing) updateProgress(j); }
     }
     const keepG = [];
@@ -481,7 +501,6 @@ async function watch() {
     const addedT = tracked().filter(id => !ids.includes(id)), addedG = groups().filter(g => !gids.some(h => h.join() === g.join()));
     setGroups([...keepG, ...addedG]); setTracked([...keep, ...addedT]); renderStrip(running); showNextResult();
   }
-  AppState.wt = setTimeout(watch, 1500);
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) watch(); });
 
@@ -506,6 +525,35 @@ function confetti() {
   clearTimeout(confetti.t); confetti.t = setTimeout(() => { $('confetti').innerHTML = ''; }, 3400);
 }
 
+/* phones: send the finished files to the share sheet ("Save Video" / "Save Image" = Photos). Needs https. */
+const PMIME = {mp4:'video/mp4', m4v:'video/mp4', mov:'video/quicktime', webm:'video/webm', jpg:'image/jpeg', jpeg:'image/jpeg', png:'image/png', webp:'image/webp', gif:'image/gif'};
+function canSharePhotos() {
+  try { return matchMedia('(pointer:coarse)').matches && !!navigator.canShare && navigator.canShare({files:[new File(['x'], 'a.mp4', {type:'video/mp4'})]}); } catch { return false; }
+}
+async function preparePhotos(j, files, url) {
+  const btn = $('rbtnPhotos'), list = files.filter(f => /\.(mp4|m4v|mov|webm|jpe?g|png|webp|gif)$/i.test(f)).slice(0, 20), out = []; let total = 0;
+  AppState.photoFor = j.id;
+  if (!list.length) return btn.remove();
+  try {                                    // fetch first: the share sheet must be opened by a tap, and a big download would make that tap expire
+    for (const f of list) {
+      const r = await fetch(url(f)); if (!r.ok) throw new Error('fetch');
+      total += +r.headers.get('content-length') || 0; if (total > 300 * 1024 * 1024) throw new Error('big');
+      const b = await r.blob(), ext = f.split('.').pop().toLowerCase();
+      out.push(new File([b], f.split('/').pop(), {type: PMIME[ext] || b.type}));
+      if ($('rbtnPhotos')) $('rbtnPhotos').textContent = `📲 Preparing ${out.length}/${list.length}…`;
+    }
+  } catch { if ($('rbtnPhotos')) $('rbtnPhotos').remove(); return; }
+  const b2 = $('rbtnPhotos'); if (!b2 || AppState.photoFor !== j.id) return;
+  b2.disabled = false; b2.textContent = '📲 Save to Photos';
+  b2.onclick = async () => { try { await navigator.share({files: out}); } catch (e) { if (e.name !== 'AbortError') toast('Could not open the share sheet'); } };
+}
+
+const photoCount = files => {                 // same rule as the server: videos + photos, but not the cover that belongs to a video
+  const vid = /\.(mp4|m4v|mov)$/i, img = /\.(jpe?g|png|gif|heic)$/i, stem = f => f.replace(/\.[^.]+$/, '');
+  const vs = new Set(files.filter(f => vid.test(f)).map(stem));
+  return files.filter(f => vid.test(f) || (img.test(f) && !vs.has(stem(f)))).length;
+};
+const isIos = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const CHECK = '<svg class="chk" viewBox="0 0 52 52"><circle class="chk-c" cx="26" cy="26" r="24" fill="none"/><path class="chk-p" fill="none" d="M14 27l8 8 16-17"/></svg>';
 function showResult(j) {
   if (j.batch) return showBatchResult(j.jobs);
@@ -516,22 +564,30 @@ function showResult(j) {
   $('rtitle').textContent = ok ? (already ? 'Already downloaded ✓' : n ? `${n} file${n > 1 ? 's' : ''} ready` : 'Already up to date') : 'Something went wrong';
   $('rtitle').style.color = ok ? 'var(--ok)' : 'var(--err)';
   $('rdesc').textContent = ok ? `${j.label} · ${j.message}` : j.message;
-  const url = f => `/files/${encodeURIComponent(j.category)}/${f.split('/').map(encodeURIComponent).join('/')}?dl=1`;
+  const url = f => `/files/${encodeURIComponent(j.category)}/${f.split('/').map(encodeURIComponent).join('/')}?dl=1&j=${encodeURIComponent(j.id)}`;
   $('rlog').innerHTML = j.log ? `<details style="text-align:left;margin-top:10px"><summary style="cursor:pointer;color:var(--mute);font-size:.8rem">Show log</summary><pre style="white-space:pre-wrap;word-break:break-word;font-size:.7rem;max-height:140px;overflow:auto;color:var(--mute)">${esc(j.log)}</pre></details>` : '';
   $('rfiles').style.display = n ? '' : 'none';
   const isImg = f => /\.(gif|webp|jpe?g|png)$/i.test(f);
-  $('rfiles').innerHTML = files.map(f => `<div class="rf">${isImg(f) ? `<img class="rimg" loading="lazy" alt="" src="${esc(url(f).replace('?dl=1', ''))}">` : ''}<span title="${esc(f)}">${esc(f)}</span><a class="mini" href="${esc(url(f))}">Save</a></div>`).join('');
+  $('rfiles').innerHTML = files.map(f => `<div class="rf">${isImg(f) ? `<img class="rimg" loading="lazy" alt="" src="${esc(url(f).replace('dl=1&', ''))}">` : ''}<span title="${esc(f)}">${esc(f)}</span><a class="mini" href="${esc(url(f))}">Save</a></div>`).join('');
   let btns = '';
   if (n > 1) btns += `<a class="btn primary" href="/zip/${encodeURIComponent(j.id)}">⬇ Download all (ZIP)</a>`;
   if (n === 1) btns += `<a class="btn primary" href="${esc(url(files[0]))}">⬇ Save to this device</a>`;
   if (already && AppState.lastRun && AppState.lastRun.payload.action_type === 'url') btns += `<button class="btn ghost" id="rbtnRedo">🔁 Download again</button>`;
   if (!ok && /instagram login|cookies\.txt/i.test(j.message || '')) btns += `<button class="btn ghost" id="rbtnIg">📸 Open Instagram login</button>`;
+  const photos = ok && n && canSharePhotos();
+  const ios = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const pcount = photoCount(files);
+  if (photos) btns = '<button class="btn primary" id="rbtnPhotos" disabled>📲 Preparing…</button>' + btns;
+  if (n) btns += '<button class="btn ghost" id="rbtnShow">📂 Show in folder</button>';
   $('rbtns').innerHTML = btns + `<button class="btn ghost" id="rbtnClose">Close</button>`;
-  
+
   if ($('rbtnRedo')) $('rbtnRedo').addEventListener('click', redo);
   if ($('rbtnIg')) $('rbtnIg').addEventListener('click', () => { closeResult(); openIgSettings(); });
   if ($('rbtnClose')) $('rbtnClose').addEventListener('click', closeResult);
-  
+  if ($('rbtnShow')) $('rbtnShow').addEventListener('click', () => { closeResult(); xRevealJob(j); });
+  if (photos) preparePhotos(j, files, url);
+  else if (ok && n && matchMedia('(pointer:coarse)').matches) $('rbtns').insertAdjacentHTML('beforeend', '<p class="hint" style="text-align:center;margin:2px 0 0">📲 To save straight into Photos, open Media Hub over https - see Settings → Phone.</p>');
+
   if (navigator.vibrate) navigator.vibrate(150);
 }
 
@@ -542,8 +598,9 @@ function showBatchResult(js) {
   $('rico').innerHTML = bad ? '<span class="warn">📦</span>' : CHECK; if (!bad) confetti(); $('rtitle').textContent = `Batch finished: ${ok} done` + (bad ? `, ${bad} failed` : '');
   $('rtitle').style.color = bad ? 'var(--text)' : 'var(--ok)'; $('rdesc').textContent = ''; $('rlog').innerHTML = ''; $('rfiles').style.display = '';
   $('rfiles').innerHTML = js.map(j => `<div class="rf" style="flex-wrap:wrap"><span title="${esc(j.message)}">${j.status === 'done' ? '✔' : '✖'} ${esc(j.label)}</span><small style="color:var(--mute);flex-basis:100%">${esc(j.message)}</small></div>`).join('');
-  $('rbtns').innerHTML = (ids.length ? `<a class="btn primary" href="/zip-multi?ids=${ids.map(encodeURIComponent).join(',')}">⬇ Download everything (ZIP)</a>` : '') + `<button class="btn ghost" id="rbtnBatchClose">Close</button>`;
+  $('rbtns').innerHTML = (ids.length ? `<a class="btn primary" href="/zip-multi?ids=${ids.map(encodeURIComponent).join(',')}">⬇ Download everything (ZIP)</a>` : '') + (ids.length ? '<button class="btn ghost" id="rbtnBatchShow">📂 Show in folder</button>' : '') + `<button class="btn ghost" id="rbtnBatchClose">Close</button>`;
   if ($('rbtnBatchClose')) $('rbtnBatchClose').addEventListener('click', closeResult);
+  if ($('rbtnBatchShow')) $('rbtnBatchShow').addEventListener('click', () => { closeResult(); xRevealJob(js.find(j => (j.files || []).length)); });
   if (navigator.vibrate) navigator.vibrate(150);
 }
 function closeResult() { AppState.resultOpen = false; $('modal').classList.remove('open'); showNextResult(); }
@@ -551,7 +608,7 @@ function closeResult() { AppState.resultOpen = false; $('modal').classList.remov
 /* ---------- batch ---------- */
 function toggleBatch() { $('batchbox').classList.toggle('open'); }
 async function startBatch() {
-  const items = [], bad = [], options = getOpts();
+  const items = [], bad = [], options = Object.assign(getOpts(), {name:''});
   for (const l of $('batchtxt').value.split('\n').map(x => x.trim()).filter(Boolean)) {
     const c = classify(l);
     if (c && c.kind === 'video') items.push({action_type:'url', target:c.url, options: isInsta(c.url) ? Object.assign({}, options, {kind:'video'}) : options});
@@ -573,7 +630,7 @@ let lastWatchHtml = '';
 async function loadWatches() {
   const d = await api('/watches'); if (!d.success || !Array.isArray(d.watches)) return;
   const on = d.watches.filter(w => w.enabled).length;
-  $('tbWatch').textContent = on || ''; $('pillWatch').textContent = `👁 ${on} watching`; $('pillWatch').classList.toggle('on', on > 0);
+  $('tbWatch').textContent = on || ''; $('rnWatch').textContent = on || ''; $('pillWatch').textContent = `👁 ${on} watching`; $('pillWatch').classList.toggle('on', on > 0);
   const ivs = d.intervals && d.intervals.length ? d.intervals : [15, 30, 60, 180, 360];
   const html = d.watches.length ? d.watches.map((w, i) => `<div class="file" style="--i:${i}">
       <span class="fav${w.enabled ? ' live' : ''}">${w.kind === 'snapchat' ? '👻' : '🎬'}</span>
@@ -581,14 +638,14 @@ async function loadWatches() {
         <div class="fmeta">${w.busy ? '⏳ checking now…' : esc(w.last_status)} · checked ${ago(w.last_check)}${w.enabled ? '' : ' · paused'} · ${w.total_new} downloaded</div></div>
       <div class="fctl">
         <select class="wsel" data-wid="${esc(w.id)}" aria-label="Check how often">${ivs.map(m => `<option value="${m}"${m === w.interval ? ' selected' : ''}>every ${ivLabel(m)}</option>`).join('')}</select>
-        <button class="mini wact-check" data-wid="${esc(w.id)}">Check now</button>
+        <button class="mini wact-check" data-wid="${esc(w.id)}" title="Check this account now">Check</button>
         <button class="mini wact-toggle" data-wid="${esc(w.id)}">${w.enabled ? 'Pause' : 'Resume'}</button>
         <button class="mini del wact-del" data-wid="${esc(w.id)}" aria-label="Stop watching">✕</button></div></div>`).join('')
     : '<div class="empty"><b>👀</b>Nothing watched yet.<br>Paste a creator\'s video or a Snapchat username above, then press <b style="display:inline;font-size:inherit">Watch</b>.</div>';
   if (html === lastWatchHtml) return;
   const a = document.activeElement; if (a && a.classList && a.classList.contains('wsel') && $('wlist').contains(a)) return;
   lastWatchHtml = html; $('wlist').innerHTML = html;
-  
+
   document.querySelectorAll('.wsel').forEach(el => el.addEventListener('change', e => setWInt(e.currentTarget.dataset.wid, e.currentTarget.value)));
   document.querySelectorAll('.wact-check').forEach(el => el.addEventListener('click', e => wact(e.currentTarget.dataset.wid, 'check')));
   document.querySelectorAll('.wact-toggle').forEach(el => el.addEventListener('click', e => wact(e.currentTarget.dataset.wid, 'toggle')));
@@ -596,7 +653,7 @@ async function loadWatches() {
 }
 
 async function addWatch(kind, target, label) {
-  const r = await post('/watches', {kind, target, label, interval: +$('wint').value, options: getOpts()});
+  const r = await post('/watches', {kind, target, label, interval: +$('wint').value, options: Object.assign(getOpts(), {name:''})});
   toast(r.success ? `Watching ✓ - checks ${$('wint').options[$('wint').selectedIndex].text}` : (r.message || 'Could not add')); loadWatches();
 }
 const watchSnap = () => addWatch('snapchat', AppState.snapUser);
@@ -608,8 +665,8 @@ async function wdel(id) { if (confirm('Stop watching this account?')) { await ap
 setInterval(() => { if (!document.hidden) loadWatches(); }, 8000); loadWatches();
 
 /* ---------- 🔧 maintenance ---------- */
-function openMaint() { $('mmodal').classList.add('open'); loadVersion(); }
-function closeMaint() { $('mmodal').classList.remove('open'); }
+function openMaint() { openSettings('tools'); }
+function closeMaint() {}
 const isTyping = t => !!t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable);
 function linkFromText(text) {
   text = String(text || '').trim(); const m = text.match(/https?:\/\/[^\s<>"']+/i);
@@ -619,14 +676,19 @@ function linkFromText(text) {
 function takeLink(v) { setTab('home'); $('url').value = v; onUrlInput(); toast('Link ready - press the big button'); }
 
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') { closeMaint(); closeSettings(); closeKeys(); return; }
+  if (e.key === 'Escape') {
+    closeMaint(); closeSettings(); closeKeys(); closePicker(); closeFiles(); closeWatch(); closePin();
+    if ($('modal').classList.contains('open')) { AppState.resultOpen ? closeResult() : hideProgress(); }
+    return;
+  }
   if ((e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === 'k') { e.preventDefault(); focusUrl(); return; }
   if (isTyping(e.target) || e.ctrlKey || e.metaKey || e.altKey || document.querySelectorAll('.overlay.open').length) return;
   const k = String(e.key).toLowerCase();
   if (k === '/') { e.preventDefault(); focusUrl(); }
   else if (k === 'c') AppState.mode ? toggleCustom() : toast('Paste a link first, then press C to customize');
   else if (k === 's') openSettings(); else if (k === 't') openMaint(); else if (k === 'h') setTab('home');
-  else if (k === 'w') { setTab('watch'); $('watchcard').scrollIntoView({behavior:'smooth', block:'start'}); }
+  else if (k === 'w') openWatch();
+  else if (k === 'f') openFiles();
   else if (e.key === '?') $('kmodal').classList.add('open');
 });
 
@@ -636,9 +698,10 @@ document.addEventListener('paste', e => {
   e.preventDefault(); takeLink(v);
 });
 
-document.addEventListener('dragover', e => { e.preventDefault(); $('smart').classList.add('drop'); });
+document.addEventListener('dragover', e => { if (X.drag) return; e.preventDefault(); $('smart').classList.add('drop'); });
 document.addEventListener('dragleave', e => { if (!e.relatedTarget) $('smart').classList.remove('drop'); });
 document.addEventListener('drop', e => {
+  if (X.drag) return;
   e.preventDefault(); $('smart').classList.remove('drop'); const dt = e.dataTransfer; if (!dt) return;
   const v = linkFromText(dt.getData('text/uri-list') || dt.getData('text/plain') || dt.getData('text')); v ? takeLink(v) : toast('That is not a link');
 });
@@ -647,12 +710,12 @@ window.addEventListener('offline', () => netState(false)); window.addEventListen
 
 async function loadVersion() {
   const v = await api('/version'); if (!v.success) return;
-  const row = (name, ok, okText, badText) => `<div class="vrow"><b>${name}<small>${ok ? '' : esc(badText)}</small></b><span class="${ok ? 'vok' : 'vok'}">${ok ? okText : '✖ missing'}</span></div>`;
+  const row = (name, ok, okText, badText) => `<div class="vrow"><b>${name}<small>${ok ? '' : esc(badText)}</small></b><span class="${ok ? 'vok' : 'vbad'}">${ok ? okText : '✖ missing'}</span></div>`;
   $('verlist').innerHTML = row('yt-dlp', true, '✔ ' + esc(v.ytdlp), '')
     + row('ffmpeg', v.ffmpeg, '✔ installed', 'Needed for effects, MP3, GIFs and stickers:  sudo apt install ffmpeg')
     + row('snapchat-dl', v.snapchat_dl, '✔ installed', 'Needed for Snapchat stories.')
     + row('gallery-dl', v.gallery_dl, '✔ installed', 'Needed for Instagram photos, stories and profiles:  pip install -U gallery-dl --break-system-packages');
-  const miss = !(v.ffmpeg && v.snapchat_dl && v.gallery_dl); $('wdot').classList.toggle('show', miss); $('wdot2').classList.toggle('show', miss);
+  SX.miss = !(v.ffmpeg && v.snapchat_dl && v.gallery_dl); updDots();
   if (!v.ffmpeg && !loadVersion.warned) { loadVersion.warned = true; toast('ffmpeg is not installed - effects, GIFs and MP3 will not work'); }
 }
 
@@ -670,7 +733,7 @@ async function restartApp() {
 /* ---------- settings ---------- */
 async function loadSettings() {
   const d = await api('/settings');
-  if (d.success) { $('ntfy').value = d.ntfy || ''; $('creatorFolders').checked = d.creator_folders !== false; $('igcap').value = d.ig_cap || 30; }
+  if (d.success) { $('ntfy').value = d.ntfy || ''; $('creatorFolders').checked = d.creator_folders !== false; $('igOrganize').checked = d.ig_organize !== false; $('autoName').value = d.auto_name || 'date'; $('preferH264').checked = d.prefer_h264 !== false; $('notifyDl').checked = !!d.notify_downloads; $('igcap').value = d.ig_cap || 30; }
   $('clipOn').checked = clipEnabled(); loadVersion(); loadIg();
 }
 async function setCreatorFolders() { await post('/settings', {creator_folders: $('creatorFolders').checked}); toast($('creatorFolders').checked ? 'New downloads go into creator folders' : 'Creator folders off'); }
@@ -685,7 +748,7 @@ async function loadIg() {
   else if (s.session_expired) el.innerHTML = '⚠ <b>Login saved, but it has expired.</b> Export a fresh cookies.txt and save it again.';
   else el.innerHTML = `✔ <b>Login saved</b> · ${s.count} cookies · sessionid ${s.has_session ? '✔' : '<b style="color:var(--err)">✖ missing - you were not logged in</b>'}`
     + (s.expires ? ` · valid until about ${esc(fmtDate(s.expires))}` : '') + (s.saved_at ? ` · saved ${esc(fmtDate(s.saved_at))}` : '');
-  $('igRemove').disabled = !s.saved; const exp = !!(s.saved && s.session_expired); $('gdot').classList.toggle('show', exp); $('gdot2').classList.toggle('show', exp);
+  $('igRemove').disabled = !s.saved; SX.igExp = !!(s.saved && s.session_expired); updDots();
 }
 
 async function igPickFile() {
@@ -718,11 +781,11 @@ function safeBind(id, event, handler) {
 function initStaticEventBindings() {
   safeBind('gearBtn', 'click', openSettings);
   safeBind('wrenchBtn', 'click', openMaint);
-  
+
   safeBind('url', 'input', onUrlInput);
   const urlEl = document.getElementById('url');
   if(urlEl) urlEl.addEventListener('keydown', (e) => { if(e.key === 'Enter') go(); });
-  
+
   safeBind('pasteBtn', 'click', pasteLink);
   safeBind('clearBtn', 'click', clearLink);
   safeBind('useClipBtn', 'click', useClip);
@@ -730,31 +793,36 @@ function initStaticEventBindings() {
   safeBind('goBtn', 'click', go);
   safeBind('custBtn', 'click', toggleCustom);
   safeBind('watchBtn', 'click', watchGo);
-  
+
   const customEl = document.getElementById('custom');
   if(customEl) customEl.addEventListener('input', e => {
       const t = e.target; if (t && t.type === 'checkbox' && t.dataset.o) document.querySelectorAll(`input[type=checkbox][data-o="${t.dataset.o}"]`).forEach(x => x.checked = t.checked);
       refreshOpts();
   });
-  
+
   safeBind('cmp', 'input', (e) => onCmp(e.target.value));
   safeBind('ptitle', 'click', (e) => e.currentTarget.classList.toggle('open'));
   safeBind('resetPresetBtn', 'click', () => applyPreset('reset'));
-  
+
   safeBind('toggleBatchBtn', 'click', toggleBatch);
   safeBind('startBatchBtn', 'click', startBatch);
   safeBind('cancelBtn', 'click', cancelJob);
   safeBind('runBackgroundBtn', 'click', hideProgress);
   safeBind('closeSettingsBtn', 'click', closeSettings);
   safeBind('smodalDoneBtn', 'click', closeSettings);
-  
+
   const smodalEl = document.getElementById('smodal');
   if(smodalEl) smodalEl.addEventListener('click', (e) => { if(e.target === smodalEl) closeSettings(); });
-  
+
   safeBind('confettiOn', 'change', (e) => setUi('confetti', e.target.checked ? '1' : '0'));
   safeBind('saveNtfyBtn', 'click', saveSettings);
   safeBind('testNtfyBtn', 'click', testSettings);
   safeBind('creatorFolders', 'change', setCreatorFolders);
+  safeBind('notifyDl', 'change', async () => { await post('/settings', {notify_downloads: $('notifyDl').checked}); toast($('notifyDl').checked ? 'You will get an alert when your downloads finish' : 'Download alerts off'); });
+  safeBind('preferH264', 'change', async () => { await post('/settings', {prefer_h264: $('preferH264').checked}); toast($('preferH264').checked ? 'New videos: iPhone-friendly (H.264)' : 'New videos: best quality, any format'); });
+  safeBind('phoneSetupBtn', 'click', () => showPhoneSetup(false));
+  safeBind('autoName', 'change', async () => { await post('/settings', {auto_name: $('autoName').value}); toast($('autoName').value === 'date' ? 'Empty name = date + number' : 'Empty name = keep the original title'); });
+  safeBind('igOrganize', 'change', async () => { await post('/settings', {ig_organize: $('igOrganize').checked}); toast($('igOrganize').checked ? 'Instagram: username / date / type folders' : 'Instagram: flat folders'); });
   safeBind('igfile', 'change', igPickFile);
   safeBind('igSave', 'click', saveIg);
   safeBind('igRemove', 'click', removeIg);
@@ -763,17 +831,16 @@ function initStaticEventBindings() {
 
   const mmodalEl = document.getElementById('mmodal');
   if(mmodalEl) mmodalEl.addEventListener('click', (e) => { if(e.target === mmodalEl) closeMaint(); });
-  
+
   safeBind('updBtn', 'click', updateYtdlp);
   safeBind('rstBtn', 'click', restartApp);
   safeBind('mmodalCloseBtn', 'click', closeMaint);
 
-  // Safely grab the tabs from nav
   const tabHome = document.querySelector('nav.tabbar [data-tab="home"]');
   const tabWatch = document.querySelector('nav.tabbar [data-tab="watch"]');
   if(tabHome) tabHome.addEventListener('click', () => setTab('home'));
-  if(tabWatch) tabWatch.addEventListener('click', () => setTab('watch'));
-  
+  if(tabWatch) tabWatch.addEventListener('click', openWatch);
+
   safeBind('navSettingsBtn', 'click', openSettings);
   safeBind('navMaintBtn', 'click', openMaint);
 
@@ -782,16 +849,816 @@ function initStaticEventBindings() {
   safeBind('closeKeysBtn', 'click', closeKeys);
 }
 
+/* ---------- story picker (Snapchat) ---------- */
+const pick = {user:'', stories:[], sel:new Set()};
+function closePicker() { $('pmodal').classList.remove('open'); }
+async function openPicker() {
+  const user = AppState.snapUser; if (!user) return;
+  $('pmodal').classList.add('open'); $('pktitle').textContent = '☑ @' + user;
+  $('pgrid').innerHTML = '<div class="empty" style="grid-column:1/-1">Loading stories…</div>'; $('pickGoBtn').disabled = true;
+  const r = await api('/snap-stories?user=' + encodeURIComponent(user));
+  if (!r.success) { $('pgrid').innerHTML = `<div class="empty" style="grid-column:1/-1"><b>😕</b>${esc(r.error || r.message || 'Could not load stories.')}</div>`; return; }
+  pick.user = user; pick.stories = r.stories; pick.sel = new Set(r.stories.filter(s => !s.saved).map(s => s.id)); renderPicker();
+}
+function renderPicker() {
+  $('pgrid').innerHTML = pick.stories.map(s => {
+    const ico = s.kind === 'video' ? '🎬' : '🖼', t = s.time ? new Date(s.time * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
+    return `<button class="ptile${pick.sel.has(s.id) ? ' on' : ''}" data-sid="${esc(s.id)}" aria-pressed="${pick.sel.has(s.id)}">`
+      + (s.thumb ? `<img loading="lazy" alt="" src="/snap-thumb?user=${encodeURIComponent(pick.user)}&id=${encodeURIComponent(s.id)}">` : `<span class="pph">${ico}</span>`)
+      + `<i class="pn">${s.index}</i><i class="pk">${ico}</i>${s.saved ? '<i class="ps">saved</i>' : ''}${t ? `<i class="pt">${esc(t)}</i>` : ''}</button>`;
+  }).join('');
+  const n = pick.sel.size; $('pickGoBtn').disabled = !n; $('pickGoBtn').textContent = n ? `⬇ Download ${n} ${n === 1 ? 'story' : 'stories'}` : 'Pick at least one';
+}
+function pickGo() {
+  if (!pick.sel.size) return; closePicker();
+  run({action_type:'snapchat', target:pick.user, options:getOpts(), only:[...pick.sel]}, 'Fetching picked stories…');
+}
+
+/* ---------- iPhone: save straight into Photos (share sheet "Save Video" / "Save Image") - no ZIP, no Shortcut ---------- */
+const PH_TYPES = /\.(mp4|m4v|mov|jpe?g|png|gif|heic)$/i;          // what the Photos app accepts
+const PH_MAX_FILES = 20, PH_MAX_BYTES = 250 * 1024 * 1024;         // per tap: the phone keeps the files in memory
+const phCapable = () => { try { return window.isSecureContext && !!navigator.canShare && navigator.canShare({files:[new File(['x'], 'a.mp4', {type:'video/mp4'})]}); } catch { return false; } };
+let PH = {abort: null};
+function phEl() {
+  let el = $('phs'); if (el) return el;
+  el = document.createElement('div'); el.id = 'phs'; el.className = 'phs';
+  el.innerHTML = '<div class="phs-card"><div class="phs-grab"></div><h3 id="phsT"></h3><div id="phsB"></div><div class="phs-btns" id="phsX"></div></div>';
+  el.addEventListener('click', e => { if (e.target === el) phClose(); });
+  document.body.appendChild(el); return el;
+}
+function phClose() { if (PH.abort) PH.abort.abort(); PH.abort = null; const el = $('phs'); if (el) el.classList.remove('open'); }
+function phShow(title, body, btns) {
+  phEl().classList.add('open'); $('phsT').textContent = title; $('phsB').innerHTML = body; $('phsX').innerHTML = btns || '';
+  $('phsX').querySelectorAll('[data-x]').forEach(b => b.addEventListener('click', () => b.dataset.x === 'close' && phClose()));
+}
+async function xSaveToPhotos(items) {
+  const all = (items || []).filter(i => !i.dir), ok = all.filter(i => PH_TYPES.test(i.name)), skipped = all.length - ok.length;
+  if (!ok.length) return toast(all.length ? 'Photos only takes mp4, mov, jpg, png, gif, heic - use “Make iPhone-friendly” first' : 'Select a video or photo first');
+  if (!phCapable()) {
+    return phShow('Open Media Hub over https', `<p class="phs-p">The iPhone only lets a website save into Photos over a secure <b>https</b> address. You are on a plain <b>http</b> one.</p>
+      <p class="phs-p">Easiest fix: on the server run <code>tailscale serve --bg 5000</code> and open the <b>https://…ts.net</b> address it shows. After that, this button saves straight into Photos.</p>
+      <p class="phs-p"><small>Meanwhile: for a photo, press and hold it → <b>Add to Photos</b>.</small></p>`, '<button class="btn ghost" data-x="close">Close</button>');
+  }
+  const queue = [...ok]; let round = 0, rounds = 0;                 // split into parts if it is a lot
+  { let n = 0, b = 0, k = 1; for (const it of queue) { if (n && (n >= PH_MAX_FILES || b + it.size > PH_MAX_BYTES)) { k++; n = 0; b = 0; } n++; b += it.size; } rounds = k; }
+  const next = async () => {
+    const part = []; let b = 0;
+    while (queue.length && part.length < PH_MAX_FILES && (!part.length || b + queue[0].size <= PH_MAX_BYTES)) { const it = queue.shift(); part.push(it); b += it.size; }
+    round++; const tag = rounds > 1 ? ` (part ${round}/${rounds})` : '';
+    const ctl = PH.abort = new AbortController(), files = []; let done = 0;
+    phShow(`Preparing ${part.length} file${part.length === 1 ? '' : 's'}${tag}…`, '<div class="phs-bar"><i id="phsBar"></i></div><p class="phs-p" id="phsMsg">Loading…</p>', '<button class="btn ghost" data-x="close">Cancel</button>');
+    try {
+      for (const it of part) {
+        const r = await fetch(xFileUrl(it), {signal: ctl.signal}); if (!r.ok) throw new Error('fetch');
+        const total = +r.headers.get('content-length') || it.size || 0, rd = r.body && r.body.getReader(), chunks = []; let got = 0;
+        if (rd) for (;;) { const {done: d, value} = await rd.read(); if (d) break; chunks.push(value); got += value.length;
+          if (total) { $('phsBar').style.width = Math.min(100, ((done + got / total) / part.length) * 100) + '%'; $('phsMsg').textContent = `${done + 1} of ${part.length} · ${it.name.slice(0, 38)}`; } }
+        const blob = rd ? new Blob(chunks) : await r.blob(), ext = it.name.split('.').pop().toLowerCase();
+        files.push(new File([blob], it.name.split('/').pop(), {type: PMIME[ext] || blob.type})); done++;
+      }
+    } catch (e) { if (e.name !== 'AbortError') phShow('Could not load the files', '<p class="phs-p">Check the connection and try again.</p>', '<button class="btn ghost" data-x="close">Close</button>'); return; }
+    PH.abort = null;
+    const label = files.length === 1 ? (/^video/.test(files[0].type) ? 'Save video to Photos' : 'Save photo to Photos') : `Save ${files.length} to Photos`;
+    phShow('Ready', `<p class="phs-p">Tap the button, then choose <b>${files.length === 1 ? (/^video/.test(files[0].type) ? 'Save Video' : 'Save Image') : 'Save ' + files.length + ' Items'}</b> in the sheet that opens.${skipped ? `<br><small>${skipped} file(s) skipped: Photos cannot take that format.</small>` : ''}</p>`,
+      `<button class="btn primary" id="phsGo">📲 ${label}</button><button class="btn ghost" data-x="close">Close</button>`);
+    $('phsGo').addEventListener('click', async () => {
+      try { await navigator.share({files}); } catch (e) { if (e.name === 'AbortError') return; toast('Could not open the share sheet'); return; }
+      if (queue.length) next(); else { phClose(); toast('Done ✓'); }
+    });
+  };
+  next();
+}
+
+/* ---------- pro video player (used by the file preview) ---------- */
+const VPI = {   // 24x24 icons
+  play:'<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>', pause:'<svg viewBox="0 0 24 24"><path d="M6 5h4v14H6zm8 0h4v14h-4z"/></svg>',
+  back:'<svg viewBox="0 0 24 24"><path d="M12 5V2L7 6l5 4V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z"/><text x="12" y="16.5" font-size="6.5" text-anchor="middle" font-weight="700">10</text></svg>',
+  fwd:'<svg viewBox="0 0 24 24"><path d="M12 5V2l5 4-5 4V7a5 5 0 1 0 5 5h2a7 7 0 1 1-7-7z"/><text x="12" y="16.5" font-size="6.5" text-anchor="middle" font-weight="700">10</text></svg>',
+  prev:'<svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>', next:'<svg viewBox="0 0 24 24"><path d="M16 6h2v12h-2zM6 18l8.5-6L6 6z"/></svg>',
+  vol:'<svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9zm13.5 3A4.5 4.5 0 0 0 14 8v8a4.5 4.5 0 0 0 2.5-4z"/></svg>', mute:'<svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9zm13 .6 1.4-1.4 2.1 2.1 2.1-2.1 1.4 1.4-2.1 2.1 2.1 2.1-1.4 1.4-2.1-2.1-2.1 2.1-1.4-1.4 2.1-2.1z"/></svg>',
+  loop:'<svg viewBox="0 0 24 24"><path d="M7 7h10v3l4-4-4-4v3H5v6h2zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2z"/></svg>',
+  pip:'<svg viewBox="0 0 24 24"><path d="M19 7h-8v6h8zm4-4H1v18h22zm-2 16H3V5h18z"/></svg>',
+  fs:'<svg viewBox="0 0 24 24"><path d="M5 5h5v2H7v3H5zm9 0h5v5h-2V7h-3zM5 14h2v3h3v2H5zm12 0h2v5h-5v-2h3z"/></svg>', fsx:'<svg viewBox="0 0 24 24"><path d="M8 5h2v5H5V8h3zm6 0h2v3h3v2h-5zM5 14h5v5H8v-3H5zm9 0h5v2h-3v3h-2z"/></svg>'
+};
+const VP_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
+const vpGet = (k, d) => { try { const v = localStorage.getItem('vp.' + k); return v === null ? d : JSON.parse(v); } catch { return d; } };
+const vpSet = (k, v) => { try { localStorage.setItem('vp.' + k, JSON.stringify(v)); } catch {} };
+const vpFmt = t => { if (!isFinite(t)) return '0:00'; t = Math.max(0, Math.floor(t)); const h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), s = t % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(s).padStart(2, '0'); };
+function vpDestroy() { if (LB.vp) { try { LB.vp.destroy(); } catch {} LB.vp = null; } }
+function vpKey(e) { return !!(LB.vp && LB.vp.key(e)); }
+function vpMount(box, src, it) {
+  const wrap = document.createElement('div'); wrap.className = 'vp'; wrap.tabIndex = 0;
+  const multi = LB.list.length > 1, canPip = !!(document.pictureInPictureEnabled || document.createElement('video').webkitSetPresentationMode);
+  wrap.innerHTML = `<video playsinline webkit-playsinline preload="metadata"></video><div class="vp-spin"></div><div class="vp-flash"></div><div class="vp-err" hidden></div>
+    <div class="vp-ctrl"><div class="vp-bar"><div class="vp-buf"></div><div class="vp-fill"></div><div class="vp-knob"></div><div class="vp-tip">0:00</div></div>
+    <div class="vp-row">${multi ? `<button data-a="prev" title="Previous (PageUp)">${VPI.prev}</button>` : ''}<button data-a="play" title="Play / pause (Space)">${VPI.play}</button>
+      <button data-a="back" title="Back 10 s (J)">${VPI.back}</button><button data-a="fwd" title="Forward 10 s (L)">${VPI.fwd}</button>${multi ? `<button data-a="next" title="Next (PageDown)">${VPI.next}</button>` : ''}
+      <span class="vp-vol"><button data-a="mute" title="Mute (M)">${VPI.vol}</button><input class="vp-vr" type="range" min="0" max="1" step="0.02" aria-label="Volume"></span>
+      <span class="vp-time">0:00 / 0:00</span><span class="vp-sp"></span>
+      <button data-a="loop" title="Loop" class="vp-t">${VPI.loop}</button><button data-a="rate" class="vp-txt" title="Speed (&lt; &gt;)">1×</button>
+      ${canPip ? `<button data-a="pip" title="Picture in picture">${VPI.pip}</button>` : ''}<button data-a="fs" title="Fullscreen (F)">${VPI.fs}</button></div></div>`;
+  box.appendChild(wrap);
+  const v = wrap.querySelector('video'), q = s => wrap.querySelector(s), bar = q('.vp-bar'), fill = q('.vp-fill'), buf = q('.vp-buf'), knob = q('.vp-knob'), tip = q('.vp-tip');
+  const timeEl = q('.vp-time'), vr = q('.vp-vr'), flash = q('.vp-flash'), errEl = q('.vp-err'), btn = a => q(`[data-a="${a}"]`);
+  const posKey = 'pos:' + it.path; let hideT = 0, scrub = false, lastSave = 0, tapT = 0, lastTap = 0, flashT = 0;
+  v.src = src; v.volume = vpGet('vol', 1); v.muted = vpGet('muted', false); v.playbackRate = vpGet('rate', 1); vr.value = v.muted ? 0 : v.volume;
+
+  const dur = () => isFinite(v.duration) ? v.duration : 0;
+  const say = html => { flash.innerHTML = html; flash.classList.remove('go'); void flash.offsetWidth; flash.classList.add('go'); };
+  const toggle = () => { if (v.paused) { v.play().catch(() => {}); } else v.pause(); };
+  const seek = d => { v.currentTime = Math.max(0, Math.min(dur() || 1e9, v.currentTime + d)); say(`<b>${d > 0 ? '+' : '−'}${Math.abs(d)} s</b>`); };
+  const setVol = x => { v.muted = false; v.volume = Math.max(0, Math.min(1, x)); say(`<b>${Math.round(v.volume * 100)}%</b>`); };
+  const poke = () => { wrap.classList.remove('hide'); clearTimeout(hideT); if (!v.paused && !scrub) hideT = setTimeout(() => wrap.classList.add('hide'), 2800); };
+  const ui = () => {
+    const d = dur(), t = v.currentTime, p = d ? t / d * 100 : 0;
+    fill.style.width = p + '%'; knob.style.left = p + '%'; timeEl.textContent = vpFmt(t) + ' / ' + vpFmt(d);
+    if (d && v.buffered.length) { let e = 0; for (let i = 0; i < v.buffered.length; i++) if (v.buffered.start(i) <= t + .5) e = Math.max(e, v.buffered.end(i)); buf.style.width = e / d * 100 + '%'; }
+  };
+  const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
+  const fsToggle = () => {
+    if (fsEl()) return (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    if (wrap.requestFullscreen) wrap.requestFullscreen().catch(() => {}); else if (wrap.webkitRequestFullscreen) wrap.webkitRequestFullscreen(); else if (v.webkitEnterFullscreen) v.webkitEnterFullscreen();   // iPhone: only the video itself can go fullscreen
+  };
+  const pipToggle = async () => { try { if (document.pictureInPictureElement) await document.exitPictureInPicture(); else if (v.requestPictureInPicture) await v.requestPictureInPicture(); else if (v.webkitSetPresentationMode) v.webkitSetPresentationMode(v.webkitPresentationMode === 'picture-in-picture' ? 'inline' : 'picture-in-picture'); } catch {} };
+  const setRate = r => { v.playbackRate = r; vpSet('rate', r); btn('rate').textContent = (r === 1 ? '1' : r) + '×'; say(`<b>${r}×</b>`); };
+  const stepRate = d => setRate(VP_RATES[Math.max(0, Math.min(VP_RATES.length - 1, VP_RATES.indexOf(v.playbackRate) + d))] || 1);
+
+  const act = a => ({
+    play: toggle, back: () => seek(-10), fwd: () => seek(10), prev: () => xLbStep(-1), next: () => xLbStep(1),
+    mute: () => { v.muted = !v.muted; },
+    loop: () => { v.loop = !v.loop; btn('loop').classList.toggle('on', v.loop); say(`<b>Loop ${v.loop ? 'on' : 'off'}</b>`); },
+    rate: () => setRate(VP_RATES[(VP_RATES.indexOf(v.playbackRate) + 1) % VP_RATES.length] || 1), pip: pipToggle, fs: fsToggle
+  }[a] || (() => {}))();
+  wrap.querySelector('.vp-row').addEventListener('click', e => { const b = e.target.closest('[data-a]'); if (b) { act(b.dataset.a); poke(); } });
+  vr.addEventListener('input', () => { v.muted = false; v.volume = +vr.value; });
+
+  // progress bar: tap / drag, with a time tooltip
+  const at = e => { const r = bar.getBoundingClientRect(); return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); };
+  bar.addEventListener('pointerdown', e => { scrub = true; bar.setPointerCapture(e.pointerId); wrap.classList.add('scrub'); v.currentTime = at(e) * dur(); ui(); });
+  bar.addEventListener('pointermove', e => { const f = at(e); tip.style.left = f * 100 + '%'; tip.textContent = vpFmt(f * dur()); if (scrub) { v.currentTime = f * dur(); ui(); } });
+  const endScrub = () => { scrub = false; wrap.classList.remove('scrub'); poke(); };
+  bar.addEventListener('pointerup', endScrub); bar.addEventListener('pointercancel', endScrub);
+
+  // picture area: mouse click = play/pause, double click = fullscreen; touch: tap = show controls, double tap left/right = -/+10 s, middle = play/pause
+  wrap.addEventListener('pointerup', e => {
+    if (e.target.closest('.vp-ctrl') || e.target.closest('.vp-err')) return;
+    if (e.pointerType === 'mouse') { if (e.button !== 0) return; clearTimeout(tapT); const now = Date.now(); if (now - lastTap < 280) { fsToggle(); lastTap = 0; } else { lastTap = now; tapT = setTimeout(toggle, 220); } wrap.focus({preventScroll: true}); return; }
+    const now = Date.now(), r = wrap.getBoundingClientRect(), f = (e.clientX - r.left) / r.width;
+    if (now - lastTap < 300) { clearTimeout(tapT); lastTap = 0; if (f < .35) seek(-10); else if (f > .65) seek(10); else toggle(); }
+    else { lastTap = now; tapT = setTimeout(() => { wrap.classList.contains('hide') || v.paused ? poke() : wrap.classList.add('hide'); }, 300); }
+  });
+  wrap.addEventListener('pointermove', e => { if (e.pointerType === 'mouse') poke(); });
+  wrap.addEventListener('mouseleave', () => { if (!v.paused) wrap.classList.add('hide'); });
+
+  // video events
+  v.addEventListener('play', () => { btn('play').innerHTML = VPI.pause; wrap.classList.remove('ended'); poke(); });
+  v.addEventListener('pause', () => { btn('play').innerHTML = VPI.play; wrap.classList.remove('hide'); clearTimeout(hideT); });
+  v.addEventListener('ended', () => { wrap.classList.add('ended'); wrap.classList.remove('hide'); vpSet(posKey, 0); });
+  v.addEventListener('timeupdate', () => { if (!scrub) ui(); const n = Date.now(); if (n - lastSave > 3000 && dur() > 40) { lastSave = n; vpSet(posKey, v.ended ? 0 : v.currentTime); } });
+  v.addEventListener('progress', ui);
+  v.addEventListener('durationchange', ui);
+  v.addEventListener('volumechange', () => { btn('mute').innerHTML = v.muted || v.volume === 0 ? VPI.mute : VPI.vol; vr.value = v.muted ? 0 : v.volume; vpSet('vol', v.volume); vpSet('muted', v.muted); });
+  v.addEventListener('waiting', () => wrap.classList.add('busy')); v.addEventListener('seeking', () => wrap.classList.add('busy'));
+  for (const n of ['playing', 'canplay', 'seeked']) v.addEventListener(n, () => wrap.classList.remove('busy'));
+  v.addEventListener('loadedmetadata', () => {
+    ui(); btn('rate').textContent = (v.playbackRate === 1 ? '1' : v.playbackRate) + '×';
+    const p = vpGet(posKey, 0); if (p > 5 && dur() > 40 && p < dur() - 8) { v.currentTime = p; say(`<b>Resumed at ${vpFmt(p)}</b>`); }
+  });
+  v.addEventListener('error', () => {
+    wrap.classList.remove('busy'); errEl.hidden = false;
+    errEl.innerHTML = `<div style="font-size:2.2rem">⚠️</div><b>This video can’t be played here</b><span>Its format is not supported by this browser (often WebM / VP9 on an iPhone). Use ⬇ Download, or select it and choose <b>Make iPhone-friendly</b>.</span>`;
+  });
+  const fsChange = () => { btn('fs').innerHTML = fsEl() ? VPI.fsx : VPI.fs; };
+  document.addEventListener('fullscreenchange', fsChange); document.addEventListener('webkitfullscreenchange', fsChange);
+
+  v.play().catch(() => {}); wrap.focus({preventScroll: true}); poke();
+  return {
+    destroy() { clearTimeout(hideT); clearTimeout(tapT); document.removeEventListener('fullscreenchange', fsChange); document.removeEventListener('webkitfullscreenchange', fsChange);
+      if (fsEl() === wrap) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      if (dur() > 40 && !v.ended) vpSet(posKey, v.currentTime); v.pause(); v.removeAttribute('src'); v.load(); wrap.remove(); },
+    key(e) {
+      if (e.ctrlKey || e.metaKey || e.altKey) return false;
+      const k = e.key; poke();
+      if (k === ' ' || k === 'k' || k === 'K') toggle();
+      else if (k === 'ArrowLeft') seek(-5); else if (k === 'ArrowRight') seek(5);
+      else if (k === 'j' || k === 'J') seek(-10); else if (k === 'l' || k === 'L') seek(10);
+      else if (k === 'ArrowUp') setVol(v.volume + .05); else if (k === 'ArrowDown') setVol(v.volume - .05);
+      else if (k === 'm' || k === 'M') act('mute'); else if (k === 'f' || k === 'F') fsToggle();
+      else if (k === '<') stepRate(-1); else if (k === '>') stepRate(1);
+      else if (k === ',' && v.paused) v.currentTime = Math.max(0, v.currentTime - 1 / 30); else if (k === '.' && v.paused) v.currentTime += 1 / 30;
+      else if (k === 'Home') v.currentTime = 0; else if (k === 'End') v.currentTime = dur();
+      else if (/^[0-9]$/.test(k)) v.currentTime = dur() * (+k / 10);
+      else return false;
+      return true;
+    }
+  };
+}
+
+/* ---------- file explorer (browse · search · tags · right-click menu) ---------- */
+const X = {path:'', q:'', tags:[], rows:[], sel:new Set(), last:-1, view:'grid', sort:'modified', desc:true, size:150,
+           seq:0, tagsAll:null, allUsers:false, drag:null, qt:null, lp:false, lpt:null, dlgCancel:null, pop:null, bandMoved:false, selMode:false};
+try { const s = JSON.parse(localStorage.getItem('hub_x') || '{}'); ['view','sort','desc','size'].forEach(k => { if (s[k] !== undefined) X[k] = s[k]; }); } catch {}
+try { if (!localStorage.getItem('hub_x') && innerWidth < 700) X.size = 104; } catch {}          // smaller tiles on a phone: 3 per row
+const xSave = () => { try { localStorage.setItem('hub_x', JSON.stringify({view:X.view, sort:X.sort, desc:X.desc, size:X.size})); } catch {} };
+const xSearching = () => !!(X.q || X.tags.length);
+const xParent = p => p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '';
+const xFileUrl = it => { const [c, ...r] = it.path.split('/'); return `/files/${encodeURIComponent(c)}/${r.map(encodeURIComponent).join('/')}`; };
+const xThumb = it => '/fs/thumb?path=' + encodeURIComponent(it.path);
+const XICON = {video:'🎬', photo:'🖼️', audio:'🎵', other:'📄'};
+const XFOLD = '<svg class="xfold" viewBox="0 0 64 52" aria-hidden="true"><path d="M4 8a4 4 0 0 1 4-4h14l6 6h28a4 4 0 0 1 4 4v30a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4z" fill="currentColor" opacity=".5"/><path d="M4 18a4 4 0 0 1 4-4h48a4 4 0 0 1 4 4v26a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4z" fill="currentColor"/></svg>';
+const xHuman = n => { for (const u of ['B','KB','MB','GB','TB']) { if (n < 1024 || u === 'TB') return (u === 'B' ? Math.round(n) : n.toFixed(1)) + ' ' + u; n /= 1024; } };
+const xGroup = t => t[0] === '@' ? 'users' : ['youtube','tiktok','snapchat','instagram','general'].includes(t) ? 'sites'
+  : ['video','photo','audio','posts','reels','stories','highlights','tagged','profile-picture'].includes(t) ? 'types' : /^\d{4}-\d{2}$/.test(t) ? 'dates' : 'custom';
+const xChip = t => `<b class="tgc tg-${xGroup(t)}">${esc(t)}</b>`;
+const xSel = () => X.rows.filter(r => X.sel.has(r.path));
+const xDate = ts => new Date(ts * 1000).toLocaleString(undefined, {dateStyle:'medium', timeStyle:'short'});
+const xPost = async (u, b) => { const r = await post(u, b); if (!r.success) toast(r.message || 'That did not work'); return r; };
+const xAfter = () => { xLoad(true); xSide(); };
+
+/* ----- loading + sorting ----- */
+async function xLoad(keepSel) {
+  const my = ++X.seq; let r;
+  if (xSearching()) { const qs = new URLSearchParams(); if (X.q) qs.set('q', X.q); X.tags.forEach(t => qs.append('tag', t)); r = await api('/fs/search?' + qs); }
+  else if (X.path === '@recent') r = await api('/fs/search?recent=1');
+  else r = await api('/fs/list?path=' + encodeURIComponent(X.path));
+  if (my !== X.seq) return;
+  if (!r.success && r.locked) { closeFiles(); return toast('The files are locked again - open them again'); }
+  if (!r.success) { toast(r.message || 'Could not open that'); if (X.path) { X.path = ''; return xLoad(); } r = {items:[]}; }
+  X.rows = r.items || [];
+  const have = new Set(X.rows.map(i => i.path));
+  X.sel = keepSel ? new Set([...X.sel].filter(p => have.has(p))) : new Set();
+  if (!keepSel) X.last = -1;
+  xRender();
+}
+function xSorted(items) {
+  const d = X.desc ? -1 : 1, k = X.sort;
+  const cmp = (a, b) => k === 'name' ? a.name.localeCompare(b.name, undefined, {numeric:true}) : k === 'size' ? (a.size || 0) - (b.size || 0)
+    : k === 'type' ? (a.kind || '').localeCompare(b.kind || '') || a.name.localeCompare(b.name) : a.modified - b.modified;
+  return [...items].sort((a, b) => (b.dir - a.dir) || cmp(a, b) * d);
+}
+async function xSide() { const r = await api('/fs/tags'); if (r.success) { X.tagsAll = r; xNav(); } }
+
+/* ----- drawing ----- */
+const xTile = (it, i) => {
+  const th = it.dir ? XFOLD : `<span class="xic">${XICON[it.kind]}</span>`
+    + (it.kind === 'video' || it.kind === 'photo' ? `<img loading="lazy" alt="" draggable="false" data-k="${it.kind}" src="${xThumb(it)}">` : '')
+    + (it.kind === 'video' ? '<i class="xplay">▶</i>' : '');
+  const sub = it.dir ? (it.count != null ? `${it.count} item${it.count === 1 ? '' : 's'}` : 'Folder') : it.size_h;
+  const tg = it.tags.filter(t => xGroup(t) !== 'dates').slice(0, 4).map(xChip).join('');
+  return `<div class="xi${X.sel.has(it.path) ? ' sel' : ''}" data-i="${i}" data-dir="${it.dir ? 1 : 0}" draggable="true" title="${esc(it.path)}">`
+    + `<div class="xth">${th}</div><div class="xnm">${esc(it.name)}</div><div class="xtg">${tg}</div><div class="xsub">${esc(sub)}</div>`
+    + `<div class="xdt">${esc(xDate(it.modified))}</div><button class="xmore" aria-label="More">⋯</button></div>`;
+};
+function xRender() {
+  X.rows = xSorted(X.rows);
+  const g = $('xgrid'); g.className = 'xgrid ' + X.view + (X.selMode ? ' selmode' : ''); g.style.setProperty('--xs', X.size + 'px');
+  g.innerHTML = X.rows.length ? X.rows.map(xTile).join('')
+    : `<div class="empty" style="grid-column:1/-1"><b>${xSearching() ? '🔍' : '📭'}</b>${xSearching() ? 'Nothing matches your search.' : X.path ? 'This folder is empty.' : 'No downloads yet.'}</div>`;
+  $('xGrid').classList.toggle('on', X.view === 'grid'); $('xList').classList.toggle('on', X.view === 'list');
+  $('xsort').value = X.sort; $('xdesc').classList.toggle('asc', !X.desc); $('xsize').value = X.size;
+  xCrumbs(); xFilters(); xStatus(); xNav();
+  if ($('xlb').classList.contains('open')) xLbSync();
+}
+function xCrumbs() {
+  let h;
+  if (xSearching()) h = '<button data-go="">🏠</button><span>›</span><b>Search results</b>';
+  else if (X.path === '@recent') h = '<button data-go="">🏠</button><span>›</span><b>Recent</b>';
+  else { const ps = X.path ? X.path.split('/') : []; h = '<button data-go="">🏠 Home</button>' + ps.map((p, i) => `<span>›</span><button data-go="${esc(ps.slice(0, i + 1).join('/'))}">${esc(p)}</button>`).join(''); }
+  $('xcrumbs').innerHTML = h;
+}
+const xFilters = () => { $('xfilters').innerHTML = X.tags.map(t => `<b class="tgc tg-${xGroup(t)}">${esc(t)} <u data-rmtag="${esc(t)}">✕</u></b>`).join(''); };
+function xStatus() {
+  const s = xSel(), size = s.reduce((a, b) => a + (b.size || 0), 0);
+  $('xstat').textContent = `${X.rows.length} item${X.rows.length === 1 ? '' : 's'}` + (s.length ? ` · ${s.length} selected${size ? ' (' + xHuman(size) + ')' : ''}` : '') + (xSearching() ? ' · search results' : '');
+  xActBar();
+}
+const XGROUPS = [['sites','🌐','Sites'], ['users','👤','Users'], ['types','🎞️','Types'], ['custom','🏷️','My tags'], ['dates','📅','Months']];
+function xNav() {
+  const T = (X.tagsAll && X.tagsAll.tags) || [];
+  const btns = XGROUPS.map(([g, ico, label]) => {
+    const all = T.filter(t => t.group === g); if (!all.length) return '';
+    const act = all.filter(t => X.tags.includes(t.name)).length;
+    return `<button data-pop="${g}" class="${act || X.pop === g ? 'on' : ''}"><span>${ico} ${label}</span><em>${act ? '✓ ' + act : all.length + ' ›'}</em></button>`;
+  }).join('');
+  $('xnav').innerHTML = `<button data-go="" class="${!X.path && !xSearching() ? 'on' : ''}"><span>🏠 All files</span></button>`
+    + `<button data-go="@recent" class="${X.path === '@recent' && !xSearching() ? 'on' : ''}"><span>🕒 Recent</span></button>`
+    + `<h5>Filter by</h5>` + btns
+    + (X.tags.length ? `<button data-clear="1"><span style="color:var(--err)">✕ Clear filters</span><em>${X.tags.length}</em></button>` : '');
+  if (X.tagsAll) $('xdisk').textContent = `${X.tagsAll.files} files · ${X.tagsAll.total_h} used · ${X.tagsAll.free_h} free`;
+}
+function xPopClose() { $('xpop').classList.remove('open'); if (X.pop) { X.pop = null; xNav(); } }
+function xPopList() {
+  const q = ($('xpq').value || '').trim().toLowerCase();
+  const rows = ((X.tagsAll && X.tagsAll.tags) || []).filter(t => t.group === X.pop && (!q || t.name.includes(q)));
+  $('xpl').innerHTML = rows.map(t => `<button data-tag="${esc(t.name)}" class="${X.tags.includes(t.name) ? 'on' : ''}"><span>${X.tags.includes(t.name) ? '✓' : ''}</span><b>${esc(t.name)}</b><em>${t.count}</em></button>`).join('') || '<div class="xhint">Nothing here yet.</div>';
+}
+function xPop(g, btn) {
+  if ($('xpop').classList.contains('open') && X.pop === g) return xPopClose();
+  X.pop = g; const label = XGROUPS.find(x => x[0] === g)[2], pop = $('xpop');
+  pop.innerHTML = `<h5>${label}</h5><div class="xhint" style="margin:-4px 0 8px">Tick several: files matching <b>any</b> of them are shown.</div><input class="xin" id="xpq" placeholder="Search ${label.toLowerCase()}…" autocomplete="off" spellcheck="false"><div id="xpl"></div>` + (X.tags.length ? '<button class="xclr" data-clear="1"><span></span><b>Clear all filters</b></button>' : '');
+  pop.classList.add('open'); xPopList(); xNav();
+  const r = btn.getBoundingClientRect();
+  pop.style.left = Math.max(8, Math.min(r.right + 8, innerWidth - pop.offsetWidth - 8)) + 'px';
+  pop.style.top = Math.max(8, Math.min(r.top, innerHeight - pop.offsetHeight - 8)) + 'px';
+  $('xpq').addEventListener('input', xPopList);
+  if (matchMedia('(hover:hover)').matches) $('xpq').focus();
+}
+function xActBar() {                            // the bar with big buttons that appears as soon as something is selected
+  const s = xSel(), bar = $('xact'); bar.classList.toggle('show', s.length > 0);
+  if (!s.length) return;
+  bar.innerHTML = `<b>${s.length} selected</b><span class="xsp"></span>` + [...(isIos() ? [['📲','Photos','phone']] : []), ['📦','ZIP','zip'], ['🏷️','Tags','tags'], ['📂','Move','move'], ['🗑️','Delete','del','danger'], ['✕','','clear']]
+    .map(([i, l, a, c]) => `<button data-a="${a}" class="${c || ''}"${l ? '' : ' aria-label="Clear selection"'}><span>${i}</span>${l ? `<em>${l}</em>` : ''}</button>`).join('');
+}
+function xMarkSel() { document.querySelectorAll('#xgrid .xi').forEach(el => el.classList.toggle('sel', X.sel.has(X.rows[+el.dataset.i].path))); xStatus(); }
+function xGo(p) { xPopClose(); X.q = ''; X.tags = []; $('xq').value = ''; X.path = p; X.sel.clear(); X.last = -1; $('xscroll').scrollTop = 0; $('xside').classList.remove('show'); xLoad(); }
+function xSetView(v) { X.view = v; xSave(); xRender(); }
+
+/* ----- selection ----- */
+function xClick(e, i) {
+  const p = X.rows[i].path;
+  if (e.shiftKey && X.last >= 0) { const a = Math.min(X.last, i), b = Math.max(X.last, i); X.sel = new Set(X.rows.slice(a, b + 1).map(r => r.path)); }
+  else if (e.ctrlKey || e.metaKey) { X.sel.has(p) ? X.sel.delete(p) : X.sel.add(p); X.last = i; }
+  else { X.sel = new Set([p]); X.last = i; }
+  xMarkSel();
+}
+function xArrow(k) {
+  if (!X.rows.length) return;
+  const cols = X.view === 'list' ? 1 : Math.max(1, getComputedStyle($('xgrid')).gridTemplateColumns.split(' ').length);
+  const d = k === 'ArrowRight' ? 1 : k === 'ArrowLeft' ? -1 : k === 'ArrowDown' ? cols : -cols;
+  const i = Math.max(0, Math.min(X.rows.length - 1, X.last < 0 ? 0 : X.last + d));
+  X.last = i; X.sel = new Set([X.rows[i].path]); xMarkSel();
+  const el = $('xgrid').children[i]; if (el && el.scrollIntoView) el.scrollIntoView({block:'nearest'});
+}
+
+/* ----- right-click menu ----- */
+function xCtxClose() { $('xctx').classList.remove('open'); }
+function xMenu(e, i) {
+  e.preventDefault();
+  if (i != null) { const p = X.rows[i].path; if (!X.sel.has(p)) { X.sel = new Set([p]); X.last = i; xMarkSel(); } } else { X.sel.clear(); xMarkSel(); }
+  const s = xSel(), one = s.length === 1 ? s[0] : null; let m;
+  if (!s.length) m = [['📁','New folder','mkdir'], ['🔄','Refresh','refresh'], ['☑️','Select all','all'], '-', [X.view === 'grid' ? '☰' : '▦', X.view === 'grid' ? 'List view' : 'Grid view', 'toggleview']];
+  else if (one) m = [['↗️', one.dir ? 'Open folder' : 'Open / preview', 'open'], one.dir ? ['📦','Download as ZIP','zip'] : ['⬇️','Download','dl'],
+    !one.dir && ['🔗','Copy link','link'], isIos() && ['📲','Save to Photos','phone'], (one.dir || one.kind === 'video') && ['📱','Make iPhone-friendly','convert'], xSearching() && ['📍','Show in folder','where'], '-', ['✏️','Rename','rename'], ['🏷️','Tags…','tags'], ['📂','Move to…','move'], '-', ['🗑️','Delete','del','danger']];
+  else m = [['📦', `Download ${s.length} as ZIP`, 'zip'], isIos() && ['📲','Save to Photos','phone'], ['📱','Make iPhone-friendly','convert'], ['🏷️','Tags…','tags'], ['📂','Move to…','move'], '-', ['🗑️', `Delete ${s.length} items`, 'del', 'danger']];
+  const c = $('xctx');
+  c.innerHTML = m.filter(Boolean).map(x => x === '-' ? '<hr>' : `<button data-a="${x[2]}" class="${x[3] || ''}"><span>${x[0]}</span>${esc(x[1])}</button>`).join('');
+  c.classList.add('open');
+  c.style.left = Math.max(8, Math.min(e.clientX, innerWidth - c.offsetWidth - 8)) + 'px';
+  c.style.top = Math.max(8, Math.min(e.clientY, innerHeight - c.offsetHeight - 8)) + 'px';
+}
+function xDownload(url) { const a = document.createElement('a'); a.href = url; a.download = ''; document.body.appendChild(a); a.click(); a.remove(); }
+function xOpen(it) { it.dir ? xGo(it.path) : xView(it); }
+async function xAct(a) {
+  const s = xSel(), one = s[0];
+  switch (a) {
+    case 'open': if (one) xOpen(one); break;
+    case 'dl': if (one) xDownload(xFileUrl(one) + '?dl=1'); break;
+    case 'zip': if (s.length) xDownload('/fs/zip?' + s.map(x => 'p=' + encodeURIComponent(x.path)).join('&')); break;
+    case 'link': { const u = location.origin + xFileUrl(one); try { await navigator.clipboard.writeText(u); toast('Link copied'); } catch { prompt('Copy this link:', u); } break; }
+    case 'where': X.q = ''; X.tags = []; $('xq').value = ''; X.path = xParent(one.path); X.sel = new Set([one.path]); xLoad(true); break;
+    case 'rename': xRename(one); break;
+    case 'tags': xTags(); break;
+    case 'move': xMove(); break;
+    case 'del': xDelete(); break;
+    case 'mkdir': xMkdir(); break;
+    case 'refresh': xAfter(); break;
+    case 'all': X.sel = new Set(X.rows.map(r => r.path)); xMarkSel(); break;
+    case 'toggleview': xSetView(X.view === 'grid' ? 'list' : 'grid'); break;
+    case 'phone': xSaveToPhotos(xSel()); break;
+    case 'convert': xConvert(); break;
+    case 'clear': X.sel.clear(); xMarkSel(); break;
+  }
+}
+
+/* ----- dialogs ----- */
+function xDialog(o) {
+  return new Promise(resolve => {
+    const d = $('xdlg');
+    d.innerHTML = `<div class="xdbox"><h4>${esc(o.title)}</h4>${o.body || ''}`
+      + (o.input != null ? `<input class="xin" id="xdin" value="${esc(o.input)}" placeholder="${esc(o.placeholder || '')}" autocomplete="off" spellcheck="false">` : '') + (o.after || '')
+      + `<div class="xdbtns"><button class="btn ghost" id="xdno" style="padding:9px 16px">Cancel</button><button class="btn ${o.danger ? 'ghost' : 'primary'}" id="xdok" style="padding:9px 16px${o.danger ? ';color:var(--err)' : ''}">${esc(o.ok || 'OK')}</button></div></div>`;
+    d.classList.add('open');
+    const done = v => { d.classList.remove('open'); d.innerHTML = ''; X.dlgCancel = null; resolve(v); };
+    X.dlgCancel = () => done(null);
+    const inp = $('xdin'), box = d.firstElementChild;
+    if (o.mount) o.mount(box);
+    $('xdok').addEventListener('click', () => done(o.collect ? o.collect() : (inp ? inp.value.trim() : true)));
+    $('xdno').addEventListener('click', () => done(null));
+    d.onmousedown = e => { if (e.target === d) done(null); };
+    if (inp) { inp.focus(); if (o.select) inp.setSelectionRange(0, o.select); if (!o.noEnter) inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('xdok').click(); } }); }
+  });
+}
+async function xRename(it) {
+  it = it || xSel()[0]; if (!it) return;
+  const dot = it.dir ? -1 : it.name.lastIndexOf('.');
+  const v = await xDialog({title:'Rename', input:it.name, select: dot > 0 ? dot : it.name.length, ok:'Rename'});
+  if (!v || v === it.name) return;
+  const r = await xPost('/fs/rename', {path:it.path, name:v});
+  if (r.success) { X.sel = new Set([r.path]); xAfter(); }
+}
+async function xMkdir() {
+  if (!X.path || X.path === '@recent' || xSearching()) return toast('Open a folder inside a site first');
+  const v = await xDialog({title:'New folder', input:'New folder', select:20, ok:'Create'}); if (!v) return;
+  const r = await xPost('/fs/mkdir', {path:X.path, name:v}); if (r.success) { X.sel = new Set([r.path]); xAfter(); }
+}
+async function xDelete(items) {
+  items = items || xSel(); if (!items.length) return;
+  const folders = items.filter(i => i.dir).length;
+  const ok = await xDialog({title:'Delete', ok:'Delete', danger:true, body:`<p style="margin:0;color:var(--mute);font-size:.9rem">Delete <b>${items.length === 1 ? esc(items[0].name) : items.length + ' items'}</b>${folders ? ' and everything inside' : ''}? This cannot be undone.</p>`});
+  if (!ok) return;
+  const r = await xPost('/fs/delete', {paths:items.map(i => i.path)}); if (r.success) { toast(`Deleted ${r.deleted}`); xAfter(); }
+}
+async function xMove(items) {
+  items = items || xSel(); if (!items.length) return;
+  const skip = new Set(items.map(i => i.path)); let cur = xParent(items[0].path);
+  const dest = await xDialog({title:`Move ${items.length} item${items.length === 1 ? '' : 's'} to…`, ok:'Move here', body:'<div class="xcrumbs" id="xmb" style="max-width:none"></div><div class="xpl" id="xml"></div>',
+    collect: () => cur,
+    mount: box => {
+      const nav = async p => {
+        cur = p; $('xdok').disabled = !p;
+        const ps = p ? p.split('/') : [];
+        $('xmb').innerHTML = '<button data-p="">🏠</button>' + ps.map((x, i) => `<span>›</span><button data-p="${esc(ps.slice(0, i + 1).join('/'))}">${esc(x)}</button>`).join('');
+        const r = await api('/fs/list?dirs=1&path=' + encodeURIComponent(p));
+        const dirs = (r.items || []).filter(i => !skip.has(i.path));
+        $('xml').innerHTML = dirs.map(i => `<button data-p="${esc(i.path)}">📁 ${esc(i.name)}</button>`).join('') || '<div class="xhint">No folders here.</div>';
+      };
+      box.addEventListener('click', e => { const b = e.target.closest('[data-p]'); if (b) nav(b.dataset.p); });
+      nav(cur);
+    }});
+  if (!dest) return;
+  const r = await xPost('/fs/move', {paths:[...skip], dest});
+  if (r.success) { toast(`Moved ${r.moved}` + (r.skipped ? ` · ${r.skipped} skipped (already exists)` : '')); xAfter(); }
+}
+async function xTags(items) {
+  items = items || xSel(); if (!items.length) return;
+  const orig = new Set(items.flatMap(i => i.mtags || [])), cur = new Set(orig);
+  const sugg = ((X.tagsAll && X.tagsAll.tags) || []).filter(t => t.group === 'custom').slice(0, 8).map(t => t.name);
+  const auto = items.length === 1 ? items[0].tags.filter(t => !(items[0].mtags || []).includes(t)) : [];
+  const draw = () => {
+    $('xtc').innerHTML = [...cur].map(t => `<b class="tgc tg-custom" data-rm="${esc(t)}">${esc(t)} <u>✕</u></b>`).join('') || '<span class="xhint">No tags of your own yet</span>';
+    $('xts').innerHTML = sugg.filter(t => !cur.has(t)).map(t => `<b class="tgc tg-custom" data-add="${esc(t)}">+ ${esc(t)}</b>`).join('');
+  };
+  const add = raw => { String(raw).split(',').map(s => s.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^\w@.\-]/g, '').slice(0, 30)).filter(Boolean).forEach(t => cur.add(t)); draw(); };
+  const r = await xDialog({title: items.length === 1 ? 'Tags · ' + items[0].name : `Tags · ${items.length} items`, ok:'Save', input:'', placeholder:'Type a tag, press Enter…', noEnter:true,
+    body:'<div class="xchips" id="xtc"></div>',
+    after:'<div class="xchips" id="xts"></div>' + (auto.length ? `<div class="xhint">Automatic tags (can’t be removed)</div><div class="xchips">${auto.map(xChip).join('')}</div>` : ''),
+    collect: () => { const v = $('xdin').value; if (v.trim()) add(v); return {add:[...cur].filter(t => !orig.has(t)), remove:[...orig].filter(t => !cur.has(t))}; },
+    mount: box => {
+      draw(); const inp = $('xdin');
+      inp.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); if (inp.value.trim()) { add(inp.value); inp.value = ''; } else $('xdok').click(); }
+        else if (e.key === ',') { e.preventDefault(); add(inp.value); inp.value = ''; }
+      });
+      box.addEventListener('click', e => { const rm = e.target.closest('[data-rm]'), ad = e.target.closest('[data-add]'); if (rm) { cur.delete(rm.dataset.rm); draw(); } else if (ad) { cur.add(ad.dataset.add); draw(); } });
+    }});
+  if (!r || (!r.add.length && !r.remove.length)) return;
+  const res = await xPost('/fs/tag', {paths:items.map(i => i.path), add:r.add, remove:r.remove}); if (res.success) { toast('Tags saved'); xAfter(); }
+}
+
+/* ----- preview viewer ----- */
+const LB = {list:[], i:0};
+function xView(it) { LB.list = X.rows.filter(r => !r.dir); LB.i = Math.max(0, LB.list.findIndex(r => r.path === it.path)); $('xlb').classList.add('open'); xLb(); }
+function xLbInfo() {
+  const it = LB.list[LB.i]; if (!it) return;
+  $('xlbt').textContent = it.name;
+  $('xlbi').innerHTML = `<span>${LB.i + 1} / ${LB.list.length}</span><span>${esc(it.size_h)}</span><span>${esc(xDate(it.modified))}</span>` + it.tags.map(xChip).join('');
+}
+function xLb() {
+  const it = LB.list[LB.i]; if (!it) return xLbClose();
+  vpDestroy();
+  const u = esc(xFileUrl(it));
+  if (it.kind === 'video') { $('xlbm').innerHTML = ''; LB.vp = vpMount($('xlbm'), xFileUrl(it), it); }
+  else $('xlbm').innerHTML = it.kind === 'photo' ? `<img src="${u}" alt="">`
+    : it.kind === 'audio' ? `<div class="xaud"><div style="font-size:4rem">🎵</div><audio src="${u}" controls autoplay></audio></div>`
+    : '<div class="xaud"><div style="font-size:4rem">📄</div><p>No preview for this file type - use Download.</p></div>';
+  $('xlbdl').href = u + '?dl=1'; xLbInfo();
+}
+function xLbSync() {                       // the list was reloaded while the viewer is open: keep it in step without restarting the video
+  const cp = LB.list[LB.i] && LB.list[LB.i].path;
+  LB.list = X.rows.filter(r => !r.dir); const j = LB.list.findIndex(r => r.path === cp);
+  if (j >= 0) { LB.i = j; xLbInfo(); } else if (!LB.list.length) xLbClose(); else { LB.i = Math.min(LB.i, LB.list.length - 1); xLb(); }
+}
+function xLbClose() { vpDestroy(); $('xlb').classList.remove('open'); $('xlbm').innerHTML = ''; }
+function xLbStep(d) { if (LB.list.length) { LB.i = (LB.i + d + LB.list.length) % LB.list.length; xLb(); } }
+
+async function xConvert() {
+  const s = xSel(); if (!s.length) return;
+  const ok = await xDialog({title:'Make iPhone-friendly', ok:'Convert', body:'<p style="margin:0;color:var(--mute);font-size:.9rem">Makes a copy of each video as <b>name [iphone].mp4</b> (H.264) that the iPhone Photos app accepts. Your originals stay where they are. Long videos take a while.</p>'});
+  if (!ok) return;
+  const r = await xPost('/fs/convert', {paths: s.map(i => i.path)}); if (!r.success) return;
+  toast(`Converting ${r.count} video${r.count === 1 ? '' : 's'}…`); xWatchJob(r.job_id);
+}
+async function xWatchJob(id) {                          // progress in the status bar, then refresh the list
+  while ($('fmodal').classList.contains('open')) {
+    const d = await api('/jobs?ids=' + id), j = d.success && d.jobs[0]; if (!j) return;
+    $('xstat').textContent = '⏳ ' + j.message;
+    if (j.status === 'done' || j.status === 'error') { toast((j.status === 'done' ? '✅ ' : '⚠️ ') + j.message); return xAfter(); }
+    await new Promise(r => setTimeout(r, 1500));
+  }
+}
+
+/* ----- jump to a finished download ----- */
+async function xReveal(paths) {
+  if (!paths || !paths.length) return;
+  if (!(await xUnlock())) return;
+  $('fmodal').classList.add('open');
+  X.q = ''; X.tags = []; $('xq').value = ''; X.path = xParent(paths[0]); X.sel = new Set(paths); X.last = -1;
+  await xLoad(true); xSide();
+  const i = X.rows.findIndex(r => X.sel.has(r.path)), el = i >= 0 && $('xgrid').children[i];
+  if (el && el.scrollIntoView) el.scrollIntoView({block:'center'});
+}
+const xRevealJob = j => j && xReveal((j.files || []).map(f => j.category + '/' + f));
+
+/* ----- open / close + wiring ----- */
+function closeFiles() {
+  const was = $('fmodal').classList.contains('open');
+  xCtxClose(); xPopClose(); xLbClose(); if (X.dlgCancel) X.dlgCancel();
+  $('fmodal').classList.remove('open'); $('xside').classList.remove('show');
+  if (was) { X.rows = []; X.sel.clear(); X.tagsAll = null; $('xgrid').innerHTML = ''; fetch('/fs/lock', {method:'POST'}).catch(() => {}); }   // lock again + forget what was shown
+}
+async function openFiles() { if (!(await xUnlock())) return; $('fmodal').classList.add('open'); xLoad(); xSide(); }
+
+function initExplorer() {
+  const g = $('xgrid'), sc = $('xscroll'), tile = e => e.target.closest('.xi');
+  g.addEventListener('click', e => {
+    const t = tile(e); if (!t) return; const i = +t.dataset.i;
+    if (X.lp) { X.lp = false; return; }
+    if (e.target.closest('.xmore')) { const r = e.target.getBoundingClientRect(); xMenu({preventDefault() {}, clientX:r.left, clientY:r.bottom}, i); e.stopPropagation(); return; }
+    if (X.selMode) { const p = X.rows[i].path; X.sel.has(p) ? X.sel.delete(p) : X.sel.add(p); X.last = i; xMarkSel(); return; }
+    if (matchMedia('(hover:none)').matches && !e.shiftKey) { X.sel = new Set([X.rows[i].path]); xOpen(X.rows[i]); return; }
+    xClick(e, i);
+  });
+  g.addEventListener('dblclick', e => { const t = tile(e); if (t && !X.selMode) xOpen(X.rows[+t.dataset.i]); });
+  sc.addEventListener('contextmenu', e => { const t = tile(e); xMenu(e, t ? +t.dataset.i : null); });
+  sc.addEventListener('click', e => { if (X.bandMoved) { X.bandMoved = false; return; } if (!tile(e)) { X.sel.clear(); xMarkSel(); } });
+  g.addEventListener('touchstart', e => {
+    const t = tile(e); if (!t) return; const tp = e.touches[0];
+    X.lpt = setTimeout(() => { X.lp = true; setTimeout(() => { X.lp = false; }, 900); xMenu({preventDefault() {}, clientX:tp.clientX, clientY:tp.clientY}, +t.dataset.i); }, 550);
+  }, {passive:true});
+  ['touchend', 'touchmove', 'touchcancel'].forEach(ev => g.addEventListener(ev, () => clearTimeout(X.lpt), {passive:true}));
+  g.addEventListener('error', e => {                         // thumbnail failed: try the original photo once, else show the icon
+    const im = e.target; if (im.tagName !== 'IMG') return;
+    if (im.dataset.k === 'photo' && !im.dataset.t) { im.dataset.t = '1'; im.src = xFileUrl(X.rows[+im.closest('.xi').dataset.i]); } else im.classList.add('bad');
+  }, true);
+  /* drag files onto a folder to move them */
+  g.addEventListener('dragstart', e => {
+    const t = tile(e); if (!t) return; const p = X.rows[+t.dataset.i].path;
+    if (!X.sel.has(p)) { X.sel = new Set([p]); xMarkSel(); }
+    X.drag = [...X.sel]; e.dataTransfer.setData('text/plain', 'hub-move'); e.dataTransfer.effectAllowed = 'move';
+  });
+  g.addEventListener('dragover', e => {
+    const t = tile(e), r = t && X.rows[+t.dataset.i];
+    document.querySelectorAll('.xi.drop').forEach(x => x.classList.remove('drop'));
+    if (X.drag && r && r.dir && !X.drag.includes(r.path)) { e.preventDefault(); e.stopPropagation(); t.classList.add('drop'); }
+  });
+  g.addEventListener('drop', async e => {
+    const t = tile(e), r = t && X.rows[+t.dataset.i]; if (!X.drag || !r || !r.dir) return;
+    e.preventDefault(); e.stopPropagation(); t.classList.remove('drop');
+    const paths = X.drag; X.drag = null;
+    const res = await xPost('/fs/move', {paths, dest:r.path}); if (res.success) { toast(`Moved ${res.moved}` + (res.skipped ? ` · ${res.skipped} skipped` : '')); xAfter(); }
+  });
+  document.addEventListener('dragend', () => { X.drag = null; document.querySelectorAll('.xi.drop').forEach(x => x.classList.remove('drop')); });
+
+  /* rubber-band selection: hold the left button on empty space and drag a rectangle (like Windows) */
+  const band = $('xband'); let bs = null;
+  sc.addEventListener('mousedown', e => {
+    if (e.button !== 0 || e.target.closest('.xi')) return;
+    const r = sc.getBoundingClientRect();
+    if (e.clientX - r.left >= sc.clientWidth || e.clientY - r.top >= sc.clientHeight) return;      // that was the scrollbar
+    e.preventDefault(); sc.focus({preventScroll:true});
+    bs = {x:e.clientX - r.left + sc.scrollLeft, y:e.clientY - r.top + sc.scrollTop, cx:e.clientX, cy:e.clientY, moved:false, base:(e.ctrlKey || e.metaKey || e.shiftKey) ? new Set(X.sel) : new Set()};
+  });
+  document.addEventListener('mousemove', e => {
+    if (!bs) return;
+    if (!bs.moved && Math.hypot(e.clientX - bs.cx, e.clientY - bs.cy) < 5) return;
+    bs.moved = true;
+    const r = sc.getBoundingClientRect();
+    if (e.clientY < r.top + 28) sc.scrollTop -= 18; else if (e.clientY > r.bottom - 28) sc.scrollTop += 18;
+    const x = Math.max(0, Math.min(sc.scrollWidth, e.clientX - r.left + sc.scrollLeft)), y = Math.max(0, Math.min(sc.scrollHeight, e.clientY - r.top + sc.scrollTop));
+    const L = Math.min(bs.x, x), T = Math.min(bs.y, y), W = Math.abs(x - bs.x), H = Math.abs(y - bs.y);
+    band.style.cssText = `display:block;left:${L}px;top:${T}px;width:${W}px;height:${H}px`;
+    const sel = new Set(bs.base);
+    document.querySelectorAll('#xgrid .xi').forEach(el => {
+      const p = X.rows[+el.dataset.i].path;
+      if (el.offsetLeft < L + W && el.offsetLeft + el.offsetWidth > L && el.offsetTop < T + H && el.offsetTop + el.offsetHeight > T) sel.add(p);
+      el.classList.toggle('sel', sel.has(p));
+    });
+    X.sel = sel; X.last = -1; xStatus();
+  });
+  document.addEventListener('mouseup', () => {
+    if (!bs) return; band.style.display = 'none'; X.bandMoved = bs.moved; bs = null;
+    setTimeout(() => { X.bandMoved = false; }, 60);
+  });
+
+  $('xact').addEventListener('click', e => { const b = e.target.closest('[data-a]'); if (b) xAct(b.dataset.a); });
+  $('xSelBtn').addEventListener('click', () => { X.selMode = !X.selMode; $('xSelBtn').classList.toggle('on', X.selMode); $('xgrid').classList.toggle('selmode', X.selMode); });
+  if (isIos()) $('xlbphone').title = 'Save to Photos'; else $('xlbphone').style.display = 'none';
+  $('xlbphone').addEventListener('click', () => { const it = LB.list[LB.i]; if (it) xSaveToPhotos([it]); });
+  let sw = null;                                       // preview: swipe down = close, swipe left/right = next / previous
+  $('xlbm').addEventListener('touchstart', e => { const tp = e.touches[0]; sw = e.target.closest('.vp-ctrl') ? null : {x:tp.clientX, y:tp.clientY, v:!!e.target.closest('.vp')}; }, {passive:true});
+  $('xlbm').addEventListener('touchend', e => {
+    if (!sw) return; const tp = e.changedTouches[0], dx = tp.clientX - sw.x, dy = tp.clientY - sw.y, v = sw.v; sw = null;
+    if (Math.abs(dy) > 90 && Math.abs(dy) > Math.abs(dx) * 1.5) xLbClose();
+    else if (!v && Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) xLbStep(dx < 0 ? 1 : -1);
+  }, {passive:true});
+  $('xctx').addEventListener('click', e => { const b = e.target.closest('button[data-a]'); if (b) { xCtxClose(); xAct(b.dataset.a); } });
+  document.addEventListener('mousedown', e => { if (!e.target.closest('#xctx')) xCtxClose(); });
+  sc.addEventListener('scroll', xCtxClose, {passive:true});
+  $('xnav').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.go !== undefined) xGo(b.dataset.go);
+    else if (b.dataset.pop) xPop(b.dataset.pop, b);
+    else if (b.dataset.clear) { X.tags = []; X.sel.clear(); xPopClose(); xLoad(); }
+  });
+  $('xpop').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.clear) { X.tags = []; X.sel.clear(); xPopClose(); xLoad(); return; }
+    if (b.dataset.tag) { const k = X.tags.indexOf(b.dataset.tag); k >= 0 ? X.tags.splice(k, 1) : X.tags.push(b.dataset.tag); X.sel.clear(); xPopList(); xLoad(); }
+  });
+  document.addEventListener('mousedown', e => { if (!e.target.closest('#xpop') && !e.target.closest('[data-pop]')) xPopClose(); });
+  $('xcrumbs').addEventListener('click', e => { const b = e.target.closest('[data-go]'); if (b) xGo(b.dataset.go); });
+  $('xfilters').addEventListener('click', e => { const b = e.target.closest('[data-rmtag]'); if (b) { X.tags = X.tags.filter(t => t !== b.dataset.rmtag); xLoad(); } });
+  $('xq').addEventListener('input', () => { clearTimeout(X.qt); X.qt = setTimeout(() => { X.q = $('xq').value.trim(); X.sel.clear(); xLoad(); }, 250); });
+  $('xUpBtn').addEventListener('click', () => { if (xSearching() || X.path === '@recent') xGo(''); else if (X.path) xGo(xParent(X.path)); });
+  $('xGrid').addEventListener('click', () => xSetView('grid')); $('xList').addEventListener('click', () => xSetView('list'));
+  $('xsort').addEventListener('change', e => { X.sort = e.target.value; xSave(); xRender(); });
+  $('xdesc').addEventListener('click', () => { X.desc = !X.desc; xSave(); xRender(); });
+  $('xsize').addEventListener('input', e => { X.size = +e.target.value; $('xgrid').style.setProperty('--xs', X.size + 'px'); xSave(); });
+  $('xMenuBtn').addEventListener('click', () => $('xside').classList.toggle('show'));
+  $('xlbx').addEventListener('click', xLbClose); $('xlbp').addEventListener('click', () => xLbStep(-1)); $('xlbn').addEventListener('click', () => xLbStep(1));
+  $('xlbtag').addEventListener('click', () => { const it = LB.list[LB.i]; if (it) xTags([it]); });
+  $('xlbdel').addEventListener('click', () => { const it = LB.list[LB.i]; if (it) xDelete([it]); });
+  $('xlb').addEventListener('click', e => { if (e.target.id === 'xlbm' || e.target.id === 'xlb') xLbClose(); });
+  $('xpop').addEventListener('contextmenu', async e => {      // right-click a tag = jump to the folder where its files are saved
+    const b = e.target.closest('button[data-tag]'); if (!b) return;
+    e.preventDefault();
+    const r = await api('/fs/search?' + new URLSearchParams({tag: b.dataset.tag}));
+    const f = r.success && r.items && r.items[0];
+    if (!f) return toast('No files with that tag');
+    xPopClose(); X.q = ''; X.tags = []; $('xq').value = '';
+    X.path = xParent(f.path); X.sel = new Set([f.path]); X.last = -1;
+    await xLoad(true); xSide();
+    toast('📍 ' + X.path);
+  });
+}
+
+/* keyboard: runs before the page-wide shortcuts, and only while the explorer is open */
+document.addEventListener('keydown', e => {
+  if (!$('fmodal').classList.contains('open')) return;
+  const k = e.key, stop = () => e.stopPropagation();
+  if ($('xdlg').classList.contains('open')) { if (k === 'Escape') { stop(); X.dlgCancel && X.dlgCancel(); } return; }
+  if ($('xctx').classList.contains('open')) { if (k === 'Escape') { stop(); xCtxClose(); } return; }
+  if ($('xpop').classList.contains('open')) { if (k === 'Escape') { stop(); xPopClose(); } return; }
+  if ($('phs') && $('phs').classList.contains('open')) { if (k === 'Escape') { stop(); phClose(); } return; }
+  if ($('xlb').classList.contains('open')) {
+    if (LB.vp && vpKey(e)) { e.preventDefault(); stop(); return; }
+    if (k === 'PageDown') xLbStep(1); else if (k === 'PageUp') xLbStep(-1);
+    else if (k === 'Escape') { stop(); xLbClose(); } else if (k === 'ArrowRight') xLbStep(1); else if (k === 'ArrowLeft') xLbStep(-1);
+    else if (k === 'Delete' && LB.list[LB.i]) xDelete([LB.list[LB.i]]);
+    return;
+  }
+  if (isTyping(e.target)) {
+    if (e.target.id === 'xq') {
+      if (k === 'Escape') { stop(); if (e.target.value) { e.target.value = ''; X.q = ''; xLoad(); } else e.target.blur(); }
+      else if (k === 'Enter') { clearTimeout(X.qt); X.q = e.target.value.trim(); xLoad(); }
+    }
+    return;
+  }
+  if (k === 'Escape') { if (X.sel.size) { stop(); X.sel.clear(); xMarkSel(); } return; }
+  if (e.ctrlKey || e.metaKey) { if (k.toLowerCase() === 'a') { e.preventDefault(); xAct('all'); } return; }
+  if (k === '/') { e.preventDefault(); $('xq').focus(); }
+  else if (k === 'Delete') xDelete();
+  else if (k === 'F2') { e.preventDefault(); xRename(); }
+  else if (k === 'Enter') xAct('open');
+  else if (k === 'Backspace') { e.preventDefault(); $('xUpBtn').click(); }
+  else if (k.startsWith('Arrow')) { e.preventDefault(); xArrow(k); }
+}, true);
+
+function initPickFilesBindings() {
+  safeBind('pickStoriesBtn', 'click', openPicker);
+  safeBind('closePickBtn', 'click', closePicker);
+  safeBind('pickGoBtn', 'click', pickGo);
+  safeBind('pickAllBtn', 'click', () => { pick.sel = new Set(pick.stories.map(s => s.id)); renderPicker(); });
+  safeBind('pickNewBtn', 'click', () => { pick.sel = new Set(pick.stories.filter(s => !s.saved).map(s => s.id)); renderPicker(); });
+  safeBind('pickNoneBtn', 'click', () => { pick.sel.clear(); renderPicker(); });
+  $('pgrid').addEventListener('click', e => {
+    const t = e.target.closest('.ptile'); if (!t) return;
+    const id = t.dataset.sid; pick.sel.has(id) ? pick.sel.delete(id) : pick.sel.add(id); renderPicker();
+  });
+  const pm = $('pmodal'); pm.addEventListener('click', e => { if (e.target === pm) closePicker(); });
+  safeBind('openFilesBtn', 'click', openFiles);
+  safeBind('closeFilesBtn', 'click', closeFiles);
+  initExplorer();
+}
+
+/* ---------- shell: left menu, watchlist panel, password for the files ---------- */
+function openWatch() { const d = $('wdr'); d.classList.remove('closing'); d.classList.add('open'); loadWatches(); }
+function closeWatch() { const d = $('wdr'); if (!d.classList.contains('open') || d.classList.contains('closing')) return; d.classList.add('closing'); setTimeout(() => d.classList.remove('open', 'closing'), 330); }
+
+let pinResolve = null;
+function pinDone(ok) { $('pinmodal').classList.remove('open'); const r = pinResolve; pinResolve = null; if (r) r(ok); }
+function closePin() { if (pinResolve) pinDone(false); }
+function xUnlock() {                                   // resolves true only when the password was right
+  return new Promise(res => {
+    closePin(); pinResolve = res;
+    $('pinerr').textContent = ''; $('pinin').value = ''; $('pinlock').textContent = '🔒'; $('pinlock').classList.remove('open');
+    $('pinmodal').classList.add('open'); setTimeout(() => $('pinin').focus(), 60);
+  });
+}
+async function pinSubmit() {
+  const pin = $('pinin').value.trim(); if (!pin) return;
+  $('pinOk').disabled = true; const r = await post('/fs/unlock', {pin}); $('pinOk').disabled = false;
+  if (r.success) { $('pinlock').textContent = '🔓'; $('pinlock').classList.add('open'); setTimeout(() => pinDone(true), 450); return; }
+  $('pinerr').textContent = r.message || 'Wrong password.'; $('pinin').value = '';
+  $('pinin').classList.remove('bad'); void $('pinin').offsetWidth; $('pinin').classList.add('bad'); $('pinin').focus();
+}
+async function showPhoneSetup(fresh) {
+  if (!(await xUnlock())) return;                                             // the key is secret: password first
+  const r = fresh ? await api('/fs/phonekey', {method:'POST'}) : await api('/fs/phonekey');
+  fetch('/fs/lock', {method:'POST'}).catch(() => {});                          // and lock again right away
+  if (!r.success) return toast('Could not read the key');
+  const g = `${r.base}/phone/grab?key=${r.key}`;
+  $('phoneSetup').innerHTML = `<div class="sxh">① Save to Photos <small>- no Shortcut, no ZIP</small></div><ol class="phsteps">
+    <li>iPhone only allows websites to save into Photos over a secure <b>https</b> address.</li>
+    <li>Easiest way (Tailscale): on the server run <code>tailscale serve --bg 5000</code>, then open the <b>https://…ts.net</b> address it prints on your iPhone (Safari → Share → Add to Home Screen).</li>
+    <li>In the file browser tap a video or photo → <b>📲</b> → <b>Save to Photos</b> (it also works for several selected files).</li></ol>
+    <div class="sxh">② Optional: Shortcut “Media Hub Share” <small>- share a link from TikTok, Instagram, YouTube…</small></div><ol class="phsteps">
+    <li><b>+</b> → name it <b>Media Hub Share</b> → tap ⓘ → turn on <b>Show in Share Sheet</b> → accepted types: <b>URLs</b> and <b>Text</b>.</li>
+    <li>Add <b>Get Contents of URL</b> with this URL: <code>${esc(g)}</code> <button class="mini" data-cp="${esc(g)}">Copy</button><br>Tap <b>Show More</b>: Method <b>POST</b>, Request Body <b>JSON</b>, add a <b>Text</b> field named <b>url</b> with the value <b>Shortcut Input</b>.</li>
+    <li>Add <b>Extract Archive</b>, then <b>Save to Photo Album</b> (input <b>Extracted Files</b>).</li>
+    <li>Now in any app: <b>Share → Media Hub Share</b>. The video lands in Photos (it waits up to about 50 seconds; longer ones finish inside Media Hub - turn on alerts in Settings → Notifications).</li></ol>
+  <p class="hint">Keep the link in ② private. <button class="linkbtn" style="padding:0" data-newkey="1">Make a new key</button> if it leaks. Away from home? Use your Tailscale address instead of the local one.</p>`;
+}
+function initShell() {
+  $('phoneSetup').addEventListener('click', async e => {
+    const c = e.target.closest('[data-cp]'), n = e.target.closest('[data-newkey]');
+    if (c) { try { await navigator.clipboard.writeText(c.dataset.cp); toast('Link copied'); } catch { prompt('Copy this link:', c.dataset.cp); } }
+    else if (n && confirm('Make a new key? The old Shortcut link stops working.')) showPhoneSetup(true);
+  });
+  document.querySelectorAll('#rail [data-nav]').forEach(b => b.addEventListener('click', () => {
+    const n = b.dataset.nav;
+    if (n === 'home') setTab('home'); else if (n === 'watch') openWatch(); else if (n === 'files') openFiles();
+    else if (n === 'settings') openSettings(); else if (n === 'keys') $('kmodal').classList.add('open');
+  }));
+  safeBind('navFilesBtn', 'click', openFiles);
+  safeBind('wdrClose', 'click', closeWatch); safeBind('wdrBack', 'click', closeWatch);
+  safeBind('pinOk', 'click', pinSubmit); safeBind('pinNo', 'click', () => pinDone(false));
+  $('pinin').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); pinSubmit(); } });
+  const pm = $('pinmodal'); pm.addEventListener('click', e => { if (e.target === pm) pinDone(false); });
+  $('sxnav').addEventListener('click', e => { const b = e.target.closest('[data-sec]'); if (b) sxPane(b.dataset.sec); });
+}
+
 /* ---------- Safe Bootup ---------- */
+/* ---------- polish: greeting, header on scroll, tap ripple, security banner ---------- */
+function initPolish() {
+  const g = $('greet'); if (g) { const h = new Date().getHours(); g.innerHTML = `${h < 5 ? '🌙' : h < 12 ? '☀️' : h < 18 ? '👋' : '🌆'} <b>${h < 5 ? 'Still up?' : h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'}</b> - what are we saving?`; }
+  const top = document.querySelector('.top'); if (top) addEventListener('scroll', () => top.classList.toggle('scrolled', scrollY > 8), {passive: true});
+  document.addEventListener('pointerdown', e => {
+    const t = e.target.closest('.brandbtn, .btn'); if (!t || t.disabled) return;
+    const r = t.getBoundingClientRect(), d = document.createElement('i'); d.className = 'rip'; d.style.left = e.clientX - r.left + 'px'; d.style.top = e.clientY - r.top + 'px';
+    t.appendChild(d); setTimeout(() => d.remove(), 650);
+    if (e.pointerType === 'touch' && navigator.vibrate) navigator.vibrate(8);
+  }, {passive: true});
+  checkSecurity();
+}
+async function checkSecurity() {
+  try {
+    const d = await (await fetch('/security/status', {cache: 'no-store'})).json(); if (!d.success || !d.problems.length) return;
+    let until = 0; try { until = +localStorage.getItem('sec.hide') || 0; } catch {}
+    if (Date.now() < until) return;
+    const b = $('secBanner'); if (!b) return;
+    b.innerHTML = `<div class="sec-h"><b>🔐 Your private files need a stronger lock</b><button class="sec-x" aria-label="Hide for a day">✕</button></div><ul>${d.problems.map(p => `<li>${esc(p.text)}</li>`).join('')}</ul>`
+      + `<details><summary>How to fix</summary><p>Add this to your docker-compose file and restart. Then open the site once with <code>/?token=YOUR_TOKEN</code>.</p><pre>environment:\n  - HUB_TOKEN=a-long-random-secret\n  - HUB_FILES_PIN=your-long-file-password\n  - HUB_STRICT=1</pre></details>`;
+    const bh = b.querySelector('.sec-h b'); if (bh) bh.addEventListener('click', () => b.classList.toggle('open'));      // phone: tap to read the details
+    b.hidden = false; b.querySelector('.sec-x').addEventListener('click', () => { b.hidden = true; try { localStorage.setItem('sec.hide', String(Date.now() + 864e5)); } catch {} });
+  } catch {}
+}
+
+function phoneTweaks() {                       // only on touch screens
+  if (!(window.matchMedia && matchMedia('(pointer:coarse)').matches)) return;
+  const ph = {url:'Paste a link or @user', fname:'Name it (optional)', xq:'Search files…'};
+  for (const k in ph) { const el = $(k); if (el) el.placeholder = ph[k]; }
+  const h = document.querySelector('.wdr-head'); let y0 = null;           // swipe the watchlist header down to close it
+  if (h) {
+    h.addEventListener('touchstart', e => { y0 = e.touches[0].clientY; }, {passive:true});
+    h.addEventListener('touchend', e => { if (y0 !== null && e.changedTouches[0].clientY - y0 > 50) closeWatch(); y0 = null; }, {passive:true});
+  }
+}
 function bootApp() {
     applyUi();
+    phoneTweaks();
     initDomInjects();
+    applyUi();                 // again: the accent swatches only exist after initDomInjects()
     initLooksAndPresets();
     initStaticEventBindings();
+    initPickFilesBindings();
+    initShell();
+    initPolish();
     loadSettings();
     setOpts({});
-    watch(); 
+    watch();
     setTimeout(checkClipboard, 700);
+    if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('/sw.js').catch(() => {});      // lets Android install it as an app
     console.log("🚀 Media Hub Boot Sequence Complete!");
 }
 

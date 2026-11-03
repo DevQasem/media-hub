@@ -9,4 +9,10 @@ services:
     volumes:
       # Maps your local ./hub-data folder to the hardcoded path in your app.py
       - ./hub-data:/root/media-downloader
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN}
+      ALLOWED_IDS: ${ALLOWED_IDS}
+      HUB_URL: "http://127.0.0.1:5000"
+      HUB_TOKEN: ${HUB_TOKEN:-}
+      HUB_FILES_PIN: ${HUB_FILES_PIN}
     restart: unless-stopped

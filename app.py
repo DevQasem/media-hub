@@ -8,6 +8,9 @@ Run (dev):   python3 app.py
 Run (prod):  gunicorn -w 1 --threads 8 -b 0.0.0.0:5000 app:app
              (keep -w 1: job state is held in this process's memory)
 
+Optional lock:  HUB_TOKEN=somesecret HUB_FILES_PIN=yourpassword python3 app.py   (HUB_STRICT=1 refuses to start with weak ones)
+                then open  http://server:5000/?token=somesecret  once (a cookie remembers it).
+
 Files live in ~/media-downloader/downloads/<category>/<Creator>/ ; state files
 (jobs.json, watches.json, settings.json, archive.txt, cookies.txt) live in ~/media-downloader/.
 
@@ -19,28 +22,35 @@ How a job knows "its" files (important when several downloads run at once):
   * job["fresh"]  -> files this job really created just now (used for watchlist counting/alerts).
 """
 
+import hashlib
+import hmac
 import json
 import logging
 import math
 import os
 import queue
 import re
+import socket
+import html
+import secrets
 import shutil
 import signal
 import subprocess
 import sys
+import struct
 import tempfile
 import threading
 import time
 import urllib.request
 import uuid
 import zipfile
+import zlib
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutTimeout
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
-from flask import Flask, jsonify, render_template, request, send_file, send_from_directory
+from flask import Flask, jsonify, redirect, render_template, request, send_file, send_from_directory
 from werkzeug.exceptions import HTTPException
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadCancelled
@@ -92,35 +102,13 @@ jobs, cancels = {}, {}
 lock = threading.Lock()
 JOBS_FILE = DATA_DIR / "jobs.json"
 
-def run_snapchat_watchlist(username):
-    # Set the path to where this user's stories are saved
-    user_folder = os.path.join("hub-data", "snapchat", username)
-    os.makedirs(user_folder, exist_ok=True)
-    
-    # 1. Take a snapshot of the files BEFORE the download runs
-    existing_files = set(os.listdir(user_folder))
-    
-    # 2. Run snapchat-dl (it will download everything currently live)
-    # The -P flag ensures it saves into the correct directory structure
-    subprocess.run(["snapchat-dl", username, "-P", "hub-data/snapchat"], check=False)
-    
-    # 3. Take a snapshot of the files AFTER the download finishes
-    current_files = set(os.listdir(user_folder))
-    
-    # 4. Math: Subtract the old files from the new files
-    new_files = current_files - existing_files
-    
-    # 5. Only return the count of TRULY new files
-    total_new_stories = len(new_files)
-    
-    return total_new_stories
 
 def save_jobs():
     """Write job state to disk so results survive a server restart."""
     try:
         with lock:
             data = json.dumps(list(jobs.values()))
-        tmp = JOBS_FILE.with_suffix(".tmp")
+        tmp = JOBS_FILE.with_suffix(f".{threading.get_ident()}.tmp")      # unique per thread
         tmp.write_text(data)
         tmp.replace(JOBS_FILE)
     except OSError:
@@ -397,10 +385,10 @@ def cookie_copy():
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
+
 def cookie_ctx(use: bool):
     return cookie_copy() if use else nullcontext(None)
 
-# ---- Instagram link types ----------------------------------------------------
 
 # ---- Instagram link types ----------------------------------------------------
 _IG_RESERVED = {"explore", "accounts", "direct", "about", "legal", "developer", "web", "challenge", "emails",
@@ -435,6 +423,17 @@ def instagram_info(url: str) -> dict:
         out.update(kind="profile", user=a)
     return out
 
+
+# gallery-dl folder layout: instagram/<username>/<post date>/<type>/file  (date = when it was POSTED, so re-runs find the same path)
+_IG_DATE = "{date:%Y-%m-%d}"
+IG_LAYOUT = {"extractor": {"instagram": {"directory": {
+    "subcategory in ('post', 'posts')": ["instagram", "{username}", _IG_DATE, "posts"],
+    "subcategory in ('reel', 'reels')": ["instagram", "{username}", _IG_DATE, "reels"],
+    "subcategory == 'stories'": ["instagram", "{username}", _IG_DATE, "stories"],
+    "subcategory == 'highlights'": ["instagram", "{username}", _IG_DATE, "highlights"],
+    "subcategory == 'tagged'": ["instagram", "{username}", _IG_DATE, "tagged"],
+    "subcategory == 'avatar'": ["instagram", "{username}", "profile-picture"],
+    "": ["instagram", "{username}", _IG_DATE, "{subcategory}"]}}}}
 
 GALLERY_MISSING = ("gallery-dl is not installed on the server, and Instagram photos, carousels, stories, "
                    "highlights and profiles need it. Install it with:  pip install -U gallery-dl "
@@ -478,6 +477,8 @@ DEFAULT_OPTS = {
     "date_after": "", "date_before": "",                        # YYYY-MM-DD
     "min_dur": "", "max_dur": "", "min_views": "", "max_mb": "",
     "title_has": "", "title_not": "",
+    "name": "",                                                 # file name typed on the page (empty = automatic)
+    "ig_what": "posts",                                         # profile link: posts | stories | highlights | all
     "force": False,                                             # re-download even if the file exists
     # effects (ffmpeg, applied after the download - like the Telegram bots)
     "fx_look": "none", "fx_blur": "none", "fx_sharpen": False, "fx_mirror": "none",
@@ -489,6 +490,7 @@ _ENUMS = {"kind": {"video", "audio", "image", "gif", "sticker"},
           "container": {"mp4", "mkv", "webm"},
           "audio_fmt": {"mp3", "m4a", "opus", "flac", "wav"},
           "abr": {"96", "128", "192", "256", "320"}, "playlist": {"single", "all"},
+          "ig_what": {"posts", "stories", "highlights", "all"},
           "fx_look": {"none", "bw", "sepia", "negative", "vivid", "warm", "cool", "vintage", "cinematic"},
           "fx_blur": {"none", "light", "strong"}, "fx_mirror": {"none", "h", "v"},
           "fx_rotate": {"0", "90", "180", "270"}, "fx_speed": {"1", "0.5", "1.5", "2"},
@@ -521,6 +523,72 @@ def _secs(v):
     return t
 
 
+def clean_filename(v):
+    """A file name typed by the user -> safe for every system (no slashes, no control characters, max 100 chars)."""
+    s = re.sub(r'[\x00-\x1f<>:"/\\|?*]', "", str(v or ""))
+    return re.sub(r"\s+", " ", s).strip().strip(".")[:100]
+
+
+_name_lock = threading.Lock()
+
+
+def _taken(d, base):
+    """Is this name already used in folder d (base.mp4, base.en.srt, base [bw].mp4 ...)?"""
+    try:
+        return any(f.name == base or f.name.startswith(base + ".") or f.name.startswith(base + " [") for f in d.iterdir())
+    except OSError:
+        return False
+
+
+def rename_files(folder, files, o, auto=False):
+    """
+    Give THIS job's files the name the user typed - or, with auto=True and nothing typed, today's date + a number.
+    Several files get _001, _002 ...; a name that is already used gets the next free number, so nothing is overwritten.
+    Covers/subtitles/effect copies keep matching their video. Returns {old relative path: new relative path}.
+    """
+    name = o.get("name") or ""
+    if not files or not (name or auto):
+        return {}
+    today, mapping, by_dir = time.strftime("%Y-%m-%d"), {}, {}
+    for rel in files:
+        pr = Path(rel)
+        by_dir.setdefault(pr.parent.as_posix(), []).append(pr.name)
+    with _name_lock:
+        for parent, names in by_dir.items():
+            d = folder if parent == "." else folder / parent
+            names = sorted(names)
+            order, bases, group = {n: i for i, n in enumerate(names)}, [], {}
+            for n in sorted(names, key=lambda x: (len(x), x)):
+                base = next((b for b in bases if n.startswith(b + ".") or n.startswith(b + " [")), None)
+                if base is None:
+                    base = n.rsplit(".", 1)[0] if "." in n else n
+                    bases.append(base)
+                group.setdefault(base, []).append(n)
+            bases.sort(key=lambda b: min(order[n] for n in group[b]))
+            counter = 0
+            for b in bases:
+                if name and len(bases) == 1:
+                    cand, k = name, 1
+                    while _taken(d, cand):
+                        k += 1
+                        cand = f"{name}_{k:03d}"
+                else:
+                    stem = name or today
+                    while True:
+                        counter += 1
+                        cand = f"{stem}_{counter:03d}"
+                        if not _taken(d, cand):
+                            break
+                for n in group[b]:
+                    new_n = cand + n[len(b):]
+                    try:
+                        os.rename(d / n, d / new_n)
+                    except OSError:
+                        continue
+                    mapping[n if parent == "." else f"{parent}/{n}"] = new_n if parent == "." else f"{parent}/{new_n}"
+    return mapping
+
+
 def sanitize_options(raw):
     """Never trust the browser: only known keys, validated values."""
     raw = raw if isinstance(raw, dict) else {}
@@ -535,6 +603,8 @@ def sanitize_options(raw):
             o[k] = re.sub(r"[^A-Za-z0-9,\-_.*]", "", str(v))[:40] or "en"
         elif k == "items":
             o[k] = str(v) if re.fullmatch(r"[0-9,\-: ]{0,30}", str(v)) else ""
+        elif k == "name":
+            o[k] = clean_filename(v)
         elif k in ("title_has", "title_not"):
             o[k] = _WORDS_RE.sub("", str(v)).strip()[:60]
         elif k in ("date_after", "date_before"):
@@ -549,7 +619,7 @@ def has_filters(o):
                                   "min_views", "max_mb", "title_has", "title_not"))
 
 
-def build_ydl_opts(options, folder, hook, tmpl=None, cookiefile=None, ig=False):
+def build_ydl_opts(options, folder, hook, tmpl=None, cookiefile=None, ig=False, ig_sub="posts"):
     """Translate UI options into a yt-dlp options dict."""
     from yt_dlp.utils import DateRange, download_range_func, match_filter_func
     o = sanitize_options(options)
@@ -560,6 +630,8 @@ def build_ydl_opts(options, folder, hook, tmpl=None, cookiefile=None, ig=False):
         who = "%(channel,uploader_id,uploader|Unknown).60B/" if ig else "%(uploader,channel,creator|Unknown).60B/"
         creator = who if settings.get("creator_folders", True) else ""
         tmpl = creator + "%(title).120B [%(id)s].%(ext)s"
+        if ig and settings.get("ig_organize", True):          # instagram/<user>/<post date>/<type>/title [id].ext
+            tmpl = who + f"%(upload_date>%Y-%m-%d|unknown-date)s/{ig_sub}/" + "%(title).120B [%(id)s].%(ext)s"
         if o["playlist"] == "all":
             tmpl = "%(playlist_title|).80B/%(playlist_index|)s %(title).100B [%(id)s].%(ext)s"
     opts = {"outtmpl": str(folder / tmpl), "quiet": True, "no_warnings": True, "noprogress": True,
@@ -586,7 +658,7 @@ def build_ydl_opts(options, folder, hook, tmpl=None, cookiefile=None, ig=False):
         q = o["quality"]
         opts["format"] = "bv*+ba/b" if q == "best" else f"bv*[height<={q}]+ba/b[height<={q}]/b"
         opts["merge_output_format"] = o["container"]
-        if o["compat"]:
+        if o["compat"] or settings.get("prefer_h264", True):        # H.264 plays everywhere, incl. iPhone Photos (VP9/AV1 do not)
             opts["format_sort"] = ["vcodec:h264", "res", "acodec:m4a"]
 
     # --- extras ----------------------------------------------------------------
@@ -628,8 +700,9 @@ def build_ydl_opts(options, folder, hook, tmpl=None, cookiefile=None, ig=False):
         opts["daterange"] = DateRange(o["date_after"].replace("-", "") or None,
                                       o["date_before"].replace("-", "") or None)
     f = []
-    for key, field, mult in (("min_dur", "duration >=", 60), ("max_dur", "duration <=", 60),
-                             ("min_views", "view_count >=", 1)):
+    # ">=?" / "<=?" = "pass if the site did not report this field" (instead of rejecting every video)
+    for key, field, mult in (("min_dur", "duration >=?", 60), ("max_dur", "duration <=?", 60),
+                             ("min_views", "view_count >=?", 1)):
         n = _num(o[key])
         if n:
             f.append(f"{field} {int(n * mult)}")
@@ -758,7 +831,7 @@ def apply_effects(folder, rels, o, job):
         is_vid = ext in VIDEO_EXT
         if not is_vid and not vf:                            # nothing to do to a photo (e.g. only "speed")
             out.append(rel); continue
-        update(job, message=f"Applying effects {i + 1}/{len(media)}…", progress=min(90 + i, 98))
+        update(job, message=f"Applying effects {media.index(rel) + 1}/{len(media)}…", progress=min(90 + i, 98))
         suffix = ".mp4" if is_vid else ext
         dst = src.with_name(f"{src.stem} [{tag}]{suffix}") if o["fx_keep"] else src.with_suffix(suffix)
         tmp = dst.with_name(f"{dst.stem}.{job['id']}.fxtmp{suffix}")      # unique per job
@@ -813,7 +886,7 @@ def make_animation(folder, rels, o, job):
             out.append(rel); continue                        # photos can't become GIFs; leave other files
         if cancel is not None and cancel.is_set():
             raise DownloadCancelled("Cancelled by user")
-        update(job, message=f"Making {o['kind']} {i + 1}/{len(media)}…", progress=min(90 + i, 98))
+        update(job, message=f"Making {o['kind']} {media.index(rel) + 1}/{len(media)}…", progress=min(90 + i, 98))
         suffix = ".gif" if gif else ".webp"
         dst = src.with_name(f"{src.stem} [{o['kind']}{'-' + tag if has_fx(o) else ''}]{suffix}")
         tmp = dst.with_name(f"{dst.stem}.{job['id']}.fxtmp{suffix}")
@@ -968,7 +1041,8 @@ def ytdlp_worker(job, url, category, options, cancel):
         with named_lock(f"url:{url}", cancel, job):
             started = clock["start"] = time.time()     # "fresh" = written after THIS moment, not while we waited
             with cookie_ctx(ig) as cf:                 # private cookie copy, deleted right after
-                with YoutubeDL(build_ydl_opts(o, folder, hook, cookiefile=cf, ig=ig)) as ydl:
+                with YoutubeDL(build_ydl_opts(o, folder, hook, cookiefile=cf, ig=ig,
+                                                  ig_sub="reels" if ig and instagram_info(url)["kind"] == "reel" else "posts")) as ydl:
                     info = ydl.extract_info(url, download=True)
             main, side = job_files(info, folder)
             files = sorted(set(main) | set(side))
@@ -988,20 +1062,35 @@ def ytdlp_worker(job, url, category, options, cancel):
             made_now = set(out) - set(targets)             # files created by the effects step
             files = sorted(set(others) | set(out))
             note = fxnote or note
-            finish_ok(job, files, note, fresh=sorted((set(fresh) & set(files)) | made_now))
+            fresh_now = (set(fresh) & set(files)) | made_now
+            auto = not o["name"] and settings.get("auto_name", "date") == "date"     # nothing typed: date + number
+            m = rename_files(folder, sorted(set(files) & fresh_now), o, auto)
+            if m:
+                files = sorted({m.get(f, f) for f in files}); fresh_now = {m.get(f, f) for f in fresh_now}
+                note = (note + " · " if note else "") + "saved as " + Path(sorted(m.values())[0]).name + (f" (+{len(m) - 1} more)" if len(m) > 1 else "")
+            finish_ok(job, files, note, fresh=sorted(fresh_now))
     except DownloadCancelled as exc:
         finish_err(job, last_line(exc, "Cancelled by user"))
     except Exception as exc:  # noqa: BLE001
         msg = last_line(exc)
-        
-        # --- NEW TIKTOK SLIDESHOW FALLBACK ---
-        if category == "tiktok" and shutil.which("gallery-dl"):
-            app.logger.info("yt-dlp failed on %s. Falling back to gallery-dl for possible slideshow...", url)
-            update(job, message="Video failed, trying gallery-dl for images...")
+
+        # TikTok photo slideshows are not videos: save the pictures with gallery-dl - but only when that is really the case
+        # (a /photo/ link, or yt-dlp says there is no video), not for network errors or filter misses.
+        if category == "tiktok" and ("/photo/" in url or re.search(r"no video|unsupported url|not be comprised of video|photo", msg, re.I)):
             exe = shutil.which("gallery-dl")
-            cmd = [exe, "-d", str(BASE_DIR), url]
-            return _gallery_run(job, cmd, folder, o, cancel, False, "", None)
-        # -------------------------------------
+            if not exe:
+                return finish_err(job, "This TikTok post is a photo slideshow. Saving photos needs gallery-dl, which is not installed on the server "
+                                       "(pip install -U gallery-dl --break-system-packages).")
+            app.logger.info("yt-dlp cannot read %s - it looks like a photo slideshow, using gallery-dl", url)
+            update(job, message="Photo slideshow - downloading the pictures…")
+            real = resolve_tiktok(url)
+            user, pid = tiktok_ids(real)
+            scratch = Path(tempfile.mkdtemp(prefix="hub-tt-", dir=str(DATA_DIR)))
+            try:
+                return _gallery_run(job, [exe, "-d", str(scratch), real], folder, o, cancel, False, "", None,
+                                    collect_root=scratch, relocate=_tiktok_relocator(scratch, folder, user, pid))
+            finally:
+                shutil.rmtree(scratch, ignore_errors=True)
 
         if type(exc).__name__ == "DownloadError":
             app.logger.warning("yt-dlp could not download %s: %s", url, msg)
@@ -1292,6 +1381,11 @@ def _snapchat_run(job, username, cancel, options=None, only=None):
             update(job, message="Applying effects…", progress=92)
             new, fxnote = postprocess_media(folder, new, o, job)
             note += f" · {fxnote}" if fxnote else ""
+        if o["name"]:
+            m = rename_files(folder, new, o)
+            if m:
+                new = sorted({m.get(f, f) for f in new})
+                note += " · saved as " + Path(sorted(m.values())[0]).name
         return finish_ok(job, new, note, fresh=new)
     if reason:
         return finish_err(job, reason)
@@ -1313,8 +1407,8 @@ def _gallery_range(o, ig):
     items = (o.get("items") or "").replace(" ", "")
     if items and re.fullmatch(r"\d[\d,\-:]*", items):
         return items, False
-    if ig["kind"] == "profile":
-        return f"1-{ig_cap()}", True
+    if ig["kind"] == "profile" and o.get("ig_what", "posts") in ("posts", "all"):
+        return f"1-{ig_cap()}", True      # stories/highlights are few: no cap
     return "", False
 
 
@@ -1361,23 +1455,40 @@ def instagram_gallery_worker(job, url, category, options, cancel):
             if not cf:
                 return finish_err(job, IG_NEEDS_LOGIN)
             cmd = [exe, "--cookies", cf, "-d", str(BASE_DIR)]
-            if rng:
+            if settings.get("ig_organize", True):                         # username / date / type folders
+                cfg = os.path.join(os.path.dirname(cf), "gallery-dl.json")  # lives in the private temp dir
+                Path(cfg).write_text(json.dumps(IG_LAYOUT))
+                cmd += ["-c", cfg]
+            if ig["kind"] == "stories" and ig["user"]:
+                url = f"https://www.instagram.com/stories/{ig['user']}/"      # ALL current stories, not only the pasted one
+            all_mode = ig["kind"] == "profile" and o["ig_what"] == "all"
+            if ig["kind"] == "profile" and not all_mode:
+                cmd += ["-o", f"include={o['ig_what']}"]
+            if rng and not all_mode:
                 cmd += ["--range", rng]
             if o["force"]:
                 cmd.append("--no-skip")
-            cmd.append(url)
-            _gallery_run(job, cmd, folder, o, cancel, capped, rng, ig)
+            if all_mode:
+                # one run per type: the item cap only limits posts + reels, never stories or highlights
+                passes = [(label, cmd + ["-o", f"include={label}"] + (["--range", rng] if ranged and rng else []) + [url], ranged)
+                          for label, ranged in (("stories", False), ("highlights", False), ("posts", True), ("reels", True))]
+                _gallery_run(job, None, folder, o, cancel, capped, rng, ig, passes=passes)
+            else:
+                cmd.append(url)
+                _gallery_run(job, cmd, folder, o, cancel, capped, rng, ig)
     except DownloadCancelled as exc:
         finish_err(job, last_line(exc, "Cancelled by user"))
 
 
-def _gallery_run(job, cmd, folder, o, cancel, capped, rng, ig):
+def _gallery_collect(job, cmd, folder, cancel, cap_n, ig, label=""):
+    """Run ONE gallery-dl process. Returns (new, old, log, reason, rc)."""
     env = {**os.environ, "PYTHONUNBUFFERED": "1", "NO_COLOR": "1"}
+    pre = f"{label}: " if label else ""
     try:
         proc = subprocess.Popen(cmd, cwd=str(folder), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, errors="replace", bufsize=1, start_new_session=True)
     except OSError as exc:
-        return finish_err(job, f"Could not start gallery-dl: {exc}")
+        return [], [], [f"Could not start gallery-dl: {exc}"], f"Could not start gallery-dl: {exc}", -1
     lines = queue.Queue()
 
     def reader():
@@ -1386,7 +1497,6 @@ def _gallery_run(job, cmd, folder, o, cancel, capped, rng, ig):
         lines.put(None)
     threading.Thread(target=reader, daemon=True).start()
 
-    cap_n = int(rng.split("-")[1]) if capped and "-" in rng else 0
     started = last = time.time()
     new, old, log, reason, eof = [], [], [], None, False
     try:
@@ -1405,7 +1515,7 @@ def _gallery_run(job, cmd, folder, o, cancel, capped, rng, ig):
                 if rel:
                     (old if was_old else new).append(rel)
                     n = len(set(new) | set(old))
-                    update(job, message=f"Saved {n} item{'s' if n != 1 else ''}…",
+                    update(job, message=f"{pre}saved {n} item{'s' if n != 1 else ''}…",
                            progress=min(5 + (n / cap_n if cap_n else n / (n + 8)) * 90, 95))
             now = time.time()
             if cancel.is_set():
@@ -1413,7 +1523,8 @@ def _gallery_run(job, cmd, folder, o, cancel, capped, rng, ig):
             if now - started > IG_HARD_TIMEOUT:
                 reason = "Timed out and was stopped"; break
             if now - last > IG_IDLE_TIMEOUT:
-                reason = "Instagram stopped answering - try again later"; break
+                reason = "Instagram stopped answering - try again later" if ig else "gallery-dl stopped answering - try again later"
+                break
     finally:
         if not eof:
             _stop_process(proc)
@@ -1422,10 +1533,40 @@ def _gallery_run(job, cmd, folder, o, cancel, capped, rng, ig):
     except subprocess.TimeoutExpired:
         _stop_process(proc)
         rc = -1
-    update(job, log="\n".join(log[-60:]))
+    return sorted(set(new)), sorted(set(old) - set(new)), log, reason, rc
 
-    new = sorted(set(new))
-    old = sorted(set(old) - set(new))
+
+def _gallery_run(job, cmd, folder, o, cancel, capped, rng, ig, passes=None, collect_root=None, relocate=None):
+    """
+    ig = Instagram link info, or None for the TikTok slideshow fallback.
+    passes = [(label, full command, capped?)]: one gallery-dl run per content type, so the item cap
+             only limits posts/reels and never cuts off stories or highlights.
+    collect_root + relocate = (TikTok photos) gallery-dl works in a scratch folder, then relocate() moves the files to their
+             final place and returns (new, old, "where it is").
+    """
+    cap_n = int(rng.split("-")[1]) if capped and "-" in rng else 0
+    if passes:
+        new, old, log, reason, rc = [], [], [], None, 0
+        for label, pcmd, ranged in passes:
+            update(job, message=f"Taking {label}…")
+            n_, o_, l_, r_, rc_ = _gallery_collect(job, pcmd, folder, cancel, cap_n if ranged else 0, ig, label)
+            new += n_; old += o_; log += [f"── {label} ──"] + l_
+            if rc_ not in (0, None) and not (n_ or o_):
+                rc = rc_                                  # a pass with nothing + an error code (e.g. no highlights)
+            if r_:
+                reason = r_
+                if r_ == "Cancelled by user":
+                    break
+        new, old = sorted(set(new)), sorted(set(old) - set(new))
+        if new or old:
+            rc = 0                                        # something was saved: an empty pass is not an error
+    else:
+        new, old, log, reason, rc = _gallery_collect(job, cmd, collect_root or folder, cancel, cap_n, ig)
+    where = ""
+    if relocate and (new or old):
+        new, old, where = relocate(new, old)
+    update(job, log="\n".join(log[-80:]))
+
     if reason == "Cancelled by user":
         return finish_err(job, reason)
     if not new and not old:
@@ -1434,14 +1575,16 @@ def _gallery_run(job, cmd, folder, o, cancel, capped, rng, ig):
         if rc not in (0, None):
             errs = [l for l in log if re.search(r"error|warning|http|login|auth|forbidden|unauthori|not found|private",
                                                 l, re.I)]
-            return finish_err(job, friendly_ig_error(last_line("\n".join(errs[-3:]) or (log[-1] if log else ""),
-                                                                "gallery-dl failed")))
+            _m = last_line("\n".join(errs[-3:]) or (log[-1] if log else ""), "gallery-dl failed")
+            return finish_err(job, friendly_ig_error(_m) if ig else _m)      # Instagram wording only for Instagram
         return finish_err(job, "Nothing found there (no posts, or the account is private).")
     note = f"Downloaded {len(new)} new item{'s' if len(new) != 1 else ''}" if new else "Already downloaded - nothing new"
     if new and old:
         note += f" · {len(old)} already saved"
+    if where:
+        note += f" · saved in {where}"
     if capped:
-        note += f" · profile capped at {cap_n} (set a range under Advanced → Items to change)"
+        note += f" · {'posts and reels' if passes else 'profile'} capped at {cap_n} (set a range under Customize → More options → Items to change)"
     if reason:
         note += f" · stopped early: {reason}"
     elif rc not in (0, None):
@@ -1454,6 +1597,11 @@ def _gallery_run(job, cmd, folder, o, cancel, capped, rng, ig):
         fresh = list(out)
         new = out
         note += f" · {fxnote}" if fxnote else ""
+    if o.get("name") and new:
+        m = rename_files(folder, new, o)
+        if m:
+            new = sorted({m.get(f, f) for f in new}); fresh = sorted({m.get(f, f) for f in fresh})
+            note += " · saved as " + Path(sorted(m.values())[0]).name
     finish_ok(job, sorted(set(new) | set(old)), note, fresh=fresh)
 
 
@@ -1472,6 +1620,79 @@ def _fetch_info(url):
             opts["cookiefile"] = cf
         with YoutubeDL(opts) as ydl:
             return ydl.extract_info(url, download=False)
+
+
+# ---- TikTok: short links, photo slideshows ----
+_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+TIKTOK_SHORT = re.compile(r"^https?://((vm|vt)\.tiktok\.com/|(www\.)?tiktok\.com/t/)", re.I)
+TIKTOK_POST = re.compile(r"/(?:photo|video)/\d+")
+
+
+def resolve_tiktok(url, timeout=6):
+    """Share links (vm.tiktok.com/…, tiktok.com/t/…) -> the real address, which says whether it is a /photo/ or a /video/."""
+    if not TIKTOK_SHORT.match(url or ""):
+        return url
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": _UA}), timeout=timeout) as r:
+            return r.geturl() or url
+    except Exception:  # noqa: BLE001
+        return url
+
+
+def tiktok_ids(url):
+    """(creator, post id) from a TikTok address; '' when unknown."""
+    u = re.search(r"/@([^/?#]+)", url or "")
+    i = re.search(r"/(?:photo|video)/(\d+)", url or "")
+    return (u.group(1) if u else ""), (i.group(1) if i else "")
+
+
+def tiktok_oembed(url, timeout=6):
+    """TikTok's public 'embed' info (title, creator, cover picture) - works for photo posts too. {} if it cannot be read."""
+    try:
+        req = urllib.request.Request("https://www.tiktok.com/oembed?url=" + quote(url, safe=""), headers={"User-Agent": _UA})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            d = json.loads(r.read().decode("utf-8", "replace"))
+            return d if isinstance(d, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _tiktok_slideshow_preview(url):
+    user, _pid = tiktok_ids(url)
+    oe = tiktok_oembed(url)
+    return jsonify(success=True, title=oe.get("title") or "TikTok photo post", thumbnail=oe.get("thumbnail_url") or "",
+                   uploader=oe.get("author_unique_id") or user or oe.get("author_name") or "", duration=None, views=None, upload_date=None,
+                   site="TikTok", category="tiktok", channel_url="", is_slideshow=True)
+
+
+def _tiktok_relocator(tmp, dest_root, user, pid):
+    """
+    gallery-dl saves wherever ITS layout says. We download into a scratch folder instead and put the photos where the
+    file browser expects them:  tiktok/<creator>/slideshow <post id>/001.jpg, 002.jpg …  (so the folder always exists).
+    """
+    who = re.sub(r"[^\w.\-]", "_", user or "")[:60].strip("._") or "unknown"
+    post = f"slideshow {pid}" if pid else "slideshow " + time.strftime("%Y%m%d-%H%M%S")
+
+    def run(new, old):
+        folder, moved, kept = dest_root / who, [], []
+        for i, rel in enumerate(sorted(set(new) | set(old)), 1):
+            src = tmp / rel
+            if not src.is_file():
+                continue
+            name = f"{pid or post}_{i:03d}{src.suffix.lower()}" if src.suffix.lower() in IMG_EXT else src.name
+            dst = folder / name
+            rel_dst = dst.relative_to(dest_root).as_posix()
+            if dst.exists():
+                kept.append(rel_dst)                      # saved before: keep it, do not duplicate
+                continue
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+                moved.append(rel_dst)
+            except OSError:
+                continue
+        return moved, kept, f"tiktok/{who}/{post}/"
+    return run
 
 
 def _ig_preview(url, ig):
@@ -1495,16 +1716,12 @@ def preview():
     if not valid_http_url(url):
         return jsonify(success=False, error="That doesn't look like a valid link."), 400
 
-    # --- TIKTOK PHOTO DETECTOR ---
-    if detect_category(url) == "tiktok" and "/photo/" in url:
-        user = url.split("@")[1].split("/")[0] if "@" in url else "TikTok User"
-        # We removed gallery=True here so the UI stays in TikTok mode!
-        return jsonify(
-            success=True, title=f"TikTok Photo Slideshow", 
-            thumbnail="", uploader=user, duration=None, views=None, 
-            upload_date=None, site="TikTok", category="tiktok", channel_url=""
-        )
-    # -----------------------------
+    # --- TikTok: share links -> real address; photo posts are not videos, so yt-dlp cannot read them (the download handles them) ---
+    tiktok = detect_category(url) == "tiktok"
+    if tiktok:
+        url = resolve_tiktok(url)
+        if "/photo/" in url:
+            return _tiktok_slideshow_preview(url)
 
     igx = None
     if is_instagram(url):
@@ -1534,6 +1751,12 @@ def preview():
         if igx:
             msg = friendly_ig_error(msg)
         app.logger.info("Preview failed for %s: %s", url, msg)
+        if tiktok and re.search(r"unsupported url|no video|not be comprised of video|photo", msg, re.I):
+            if TIKTOK_POST.search(url):
+                return _tiktok_slideshow_preview(url)     # a photo slideshow: say so instead of "unsupported"
+            if TIKTOK_SHORT.match(url):                   # a share link we could not open: the download works out what it is
+                return jsonify(success=True, title="TikTok link", thumbnail="", uploader="", duration=None, views=None, upload_date=None,
+                               site="TikTok", category="tiktok", channel_url="")
         return jsonify(success=False, error=msg[:300])
 
 
@@ -1685,7 +1908,9 @@ def download_action():
                        only=src.get("only") if "only" in src else None)
     if err:
         return jsonify(success=False, message=err), 400
-    return jsonify(success=True, job_id=job["id"], folder=str(BASE_DIR / job["category"])), 202
+    resp = jsonify(success=True, job_id=job["id"], folder=str(BASE_DIR / job["category"]))
+    resp.status_code = 202
+    return _remember_jobs(resp, job["id"])
 
 
 @app.route("/batch", methods=["POST"])
@@ -1703,7 +1928,9 @@ def batch_download():
     with lock:
         batches[bid] = made
     check_batch(bid)
-    return jsonify(success=bool(made), job_ids=made, errors=errors, batch_id=bid), 202
+    resp = jsonify(success=bool(made), job_ids=made, errors=errors, batch_id=bid)
+    resp.status_code = 202
+    return _remember_jobs(resp, *made)
 
 
 def _run_safely(fn, job, *args):
@@ -1733,15 +1960,11 @@ def job_status(job_id):
 def recent_jobs():
     """
     /jobs?ids=a,b,c  -> exactly those jobs (what the page uses, so nothing falls out of a 'recent' window)
-    /jobs            -> the 40 newest manual jobs (watchlist checks are hidden)
+    /jobs            -> nothing (job ids are private to the browser that started them)
     """
     ids = [i for i in (request.args.get("ids") or "").split(",") if i][:200]
     with lock:
-        if ids:
-            items = [jobs[i] for i in ids if i in jobs]
-        else:
-            items = sorted((j for j in jobs.values() if not j.get("silent")),
-                           key=lambda j: j["created"], reverse=True)[:40]
+        items = [jobs[i] for i in ids if i in jobs]          # only the jobs you ask for by id - there is no list of everything
         return jsonify(success=True, jobs=items)
 
 
@@ -1834,6 +2057,30 @@ def file_item(category, name):
     return resp
 
 
+# --------------------------------------------------------------------------- #
+# Optional access lock (set HUB_TOKEN to turn it on)
+# --------------------------------------------------------------------------- #
+HUB_TOKEN = os.environ.get("HUB_TOKEN", "").strip()      # empty = no lock (same as before)
+
+
+def _token_ok(v):
+    return bool(v) and hmac.compare_digest(str(v), HUB_TOKEN)
+
+
+@app.before_request
+def require_token():
+    """If HUB_TOKEN is set, every request needs it. Open the site once with /?token=YOUR_TOKEN - it is then kept in a cookie."""
+    if not HUB_TOKEN or request.path.startswith(("/assets/", "/phone/", "/icon/", "/manifest.webmanifest", "/sw.js")):      # /phone/ has its own key; the rest is needed to install the app
+        return None
+    if _token_ok(request.cookies.get("hub_token")) or _token_ok(request.headers.get("X-Hub-Token")):
+        return None
+    if _token_ok(request.args.get("token")):
+        resp = redirect(request.path)
+        resp.set_cookie("hub_token", HUB_TOKEN, httponly=True, samesite="Lax", max_age=60 * 60 * 24 * 365)
+        return resp
+    return jsonify(success=False, message="Locked. Open the site once with ?token=YOUR_TOKEN."), 401
+
+
 @app.after_request
 def security_headers(resp):
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -1874,7 +2121,7 @@ def _load(path, default):
 
 def _save(path, data):
     try:
-        tmp = path.with_suffix(".tmp")
+        tmp = path.with_suffix(f".{threading.get_ident()}.tmp")           # unique per thread
         tmp.write_text(json.dumps(data))
         tmp.replace(path)
     except OSError:
@@ -1918,8 +2165,12 @@ def check_batch(bid):
 
 
 def _after_finish(job, ok):
-    """Manual downloads and batches do NOT notify: the phone only hears about the watchlist."""
-    return
+    """A phone alert when a download YOU started finishes - only if you switched that on (Settings → Notifications).
+    Watchlist checks alert on their own; batch items stay quiet so 50 links do not send 50 alerts."""
+    if not settings.get("notify_downloads") or job.get("silent") or job.get("batch"):
+        return
+    label = re.sub(r"^https?://(www\.)?", "", str(job.get("label") or ""))[:50]
+    notify(("✅ Done: " if ok else "⚠️ Failed: ") + label, str(job.get("message") or "")[:200], ["white_check_mark" if ok else "warning"])
 
 
 def _plural(n, word):
@@ -2129,7 +2380,7 @@ def watches_api():
              "category": category, "interval": interval, "enabled": True, "created": time.time(),
              "next_check": time.time(), "last_check": None, "last_status": "Waiting for first check…",
              "last_new": 0, "total_new": 0, "baselined": kind == "snapchat", "busy": False,
-             "options": sanitize_options(d.get("options"))}
+             "options": dict(sanitize_options(d.get("options")), name="")}
         watches[w["id"]] = w
         _save(WATCH_FILE, watches)
     return jsonify(success=True, watch=w), 201
@@ -2175,6 +2426,14 @@ def settings_api():
             settings["ntfy"] = str(d["ntfy"] or "").strip()[:200]
         if "creator_folders" in d:
             settings["creator_folders"] = bool(d["creator_folders"])
+        if "ig_organize" in d:
+            settings["ig_organize"] = bool(d["ig_organize"])
+        if d.get("auto_name") in ("date", "keep"):
+            settings["auto_name"] = d["auto_name"]
+        if "notify_downloads" in d:
+            settings["notify_downloads"] = bool(d["notify_downloads"])
+        if "prefer_h264" in d:
+            settings["prefer_h264"] = bool(d["prefer_h264"])
         if "ig_cap" in d:
             try:
                 settings["ig_cap"] = max(1, min(500, int(d["ig_cap"])))
@@ -2182,7 +2441,9 @@ def settings_api():
                 return jsonify(success=False, message="The profile limit must be a number (1-500)."), 400
         _save(SETTINGS_FILE, settings)
     return jsonify(success=True, ntfy=settings.get("ntfy", ""),
-                   creator_folders=settings.get("creator_folders", True), ig_cap=ig_cap())
+                   creator_folders=settings.get("creator_folders", True), ig_organize=settings.get("ig_organize", True), auto_name=settings.get("auto_name", "date"), prefer_h264=settings.get("prefer_h264", True),
+                   notify_downloads=settings.get("notify_downloads", False),
+                   ig_cap=ig_cap())
 
 
 # ---- Instagram login card ------------------------------------------------------
@@ -2287,11 +2548,715 @@ def settings_test():
     return jsonify(success=err is None, message=err or "Sent - check your phone.")
 
 
+# --------------------------------------------------------------------------- #
+# File explorer: browse / search / tags / rename / move / delete / zip / thumbnails
+# --------------------------------------------------------------------------- #
+TAGS_FILE = DATA_DIR / "tags.json"
+THUMB_DIR = DATA_DIR / "thumbs"
+THUMB_DIR.mkdir(parents=True, exist_ok=True)
+TYPE_FOLDERS = {"posts", "reels", "stories", "highlights", "tagged", "profile-picture"}
+KIND_EXT = {"video": VIDEO_EXT, "photo": IMG_EXT, "audio": AUDIO_EXT}
+manual_tags = {}                       # "category/folder/file" -> ["tag", ...]  (tags YOU added; automatic ones are computed)
+tlock = threading.RLock()
+_idx = {"t": 0.0, "files": []}         # cached list of every saved file (refreshed every 10 s or after a change)
+_thumb_sem = threading.Semaphore(3)    # at most 3 thumbnails are generated at once
+
+
+def _tagname(s):
+    s = re.sub(r"\s+", "-", str(s or "").strip().lower())
+    return re.sub(r"[^\w@.\-]", "", s, flags=re.UNICODE)[:30].strip("-")
+
+
+def file_kind(name):
+    low = name.lower()
+    for kind, exts in KIND_EXT.items():
+        if low.endswith(exts):
+            return kind
+    return "other"
+
+
+def fs_rel(p):
+    return "" if p == BASE_DIR else p.relative_to(BASE_DIR).as_posix()
+
+
+def fs_abs(rel):
+    """Virtual path ('instagram/user/…') -> absolute path inside the downloads folder, or None if it is not allowed."""
+    parts = [x for x in str(rel or "").strip("/").split("/") if x]
+    if any(x in (".", "..") or "\x00" in x for x in parts) or (parts and parts[0] not in CATEGORIES):
+        return None
+    try:
+        p = BASE_DIR.joinpath(*parts).resolve()
+        p.relative_to(BASE_DIR)
+    except (ValueError, OSError):
+        return None
+    return p
+
+
+def auto_tags(rel, is_dir=False):
+    """Tags every file gets by itself, from where it is saved: site, @user, type, month, video/photo/audio."""
+    parts = rel.split("/")
+    t = set()
+    if parts[0] in CATEGORIES:
+        t.add(parts[0])
+    if len(parts) >= 3 or (is_dir and len(parts) >= 2):
+        u = _tagname(parts[1]).lstrip("@")
+        if u:
+            t.add("@" + u)
+    for seg in parts[2:]:
+        if seg in TYPE_FOLDERS:
+            t.add(seg)
+        elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", seg):
+            t.add(seg[:7])
+    if not is_dir and file_kind(parts[-1]) != "other":
+        t.add(file_kind(parts[-1]))
+    return t
+
+
+def manual_for(rel):
+    """Your own tags on this path AND on every folder above it (tag a user folder = tag everything inside)."""
+    out, parts = set(), rel.split("/")
+    with tlock:
+        for i in range(1, len(parts) + 1):
+            out.update(manual_tags.get("/".join(parts[:i]), ()))
+    return out
+
+
+def tags_of(rel, is_dir=False):
+    return sorted(auto_tags(rel, is_dir) | manual_for(rel))
+
+
+def tag_group(t):
+    if t.startswith("@"):
+        return "users"
+    if t in CATEGORIES:
+        return "sites"
+    if t in ("video", "photo", "audio") or t in TYPE_FOLDERS:
+        return "types"
+    return "dates" if re.fullmatch(r"\d{4}-\d{2}", t) else "custom"
+
+
+def _item(rel, size, mtime, isd, count=None):
+    name = rel.rsplit("/", 1)[-1]
+    with tlock:
+        direct = list(manual_tags.get(rel, ()))
+    it = {"name": name, "path": rel, "dir": isd, "modified": mtime, "tags": tags_of(rel, isd), "mtags": direct}
+    if isd:
+        it["count"] = count
+    else:
+        it.update(size=size, size_h=human(size), kind=file_kind(name))
+    return it
+
+
+def fs_index():
+    now = time.time()
+    if now - _idx["t"] < 10:
+        return _idx["files"]
+    out = []
+    for cat in CATEGORIES:
+        for dp, _dn, fns in os.walk(BASE_DIR / cat):
+            for fn in fns:
+                if fn.startswith(".") or is_partial(fn):
+                    continue
+                fp = os.path.join(dp, fn)
+                try:
+                    st = os.stat(fp)
+                except OSError:
+                    continue
+                out.append((Path(fp).relative_to(BASE_DIR).as_posix(), st.st_size, st.st_mtime))
+    _idx.update(t=now, files=out)
+    return out
+
+
+def fs_dirty():
+    _idx["t"] = 0.0
+
+
+def _retag(old, new=None):
+    """Keep your tags attached when something is renamed/moved (new) or forget them when deleted (None)."""
+    with tlock:
+        for k in [k for k in manual_tags if k == old or k.startswith(old + "/")]:
+            v = manual_tags.pop(k)
+            if new is not None:
+                manual_tags[new + k[len(old):]] = v
+        _save(TAGS_FILE, manual_tags)
+
+
+def _name_ok(name):
+    return bool(name) and name not in (".", "..") and not re.search(r"[/\\\x00]", name) and len(name) <= 200
+
+
+@app.route("/fs/list")
+def fs_list():
+    p = fs_abs(request.args.get("path"))
+    if p is None or not p.is_dir():
+        return jsonify(success=False, message="Folder not found."), 404
+    dirs_only, base, items = request.args.get("dirs") == "1", fs_rel(p), []
+    try:
+        with os.scandir(p) as scan:
+            for e in scan:
+                if e.name.startswith(".") or is_partial(e.name) or (p == BASE_DIR and e.name not in CATEGORIES):
+                    continue
+                try:
+                    isd, st = e.is_dir(follow_symlinks=False), e.stat(follow_symlinks=False)
+                    if not isd and not e.is_file(follow_symlinks=False):
+                        continue
+                except OSError:
+                    continue
+                if dirs_only and not isd:
+                    continue
+                count = None
+                if isd:
+                    try:
+                        count = sum(1 for n in os.listdir(e.path) if not n.startswith(".") and not is_partial(n))
+                    except OSError:
+                        pass
+                items.append(_item((base + "/" if base else "") + e.name, st.st_size, st.st_mtime, isd, count))
+    except OSError:
+        return jsonify(success=False, message="Could not read that folder."), 500
+    return jsonify(success=True, path=base, items=items)
+
+
+@app.route("/fs/search")
+def fs_search():
+    words = (request.args.get("q") or "").lower().split()
+    want = [x for x in (_tagname(t) for t in request.args.getlist("tag")) if x]
+    recent = request.args.get("recent") == "1"
+    groups = {}
+    for tg_ in want:
+        groups.setdefault(tag_group(tg_), []).append(tg_)
+    if not (words or want or recent):
+        return jsonify(success=True, items=[])
+    out = []
+    for rel, size, mt in sorted(fs_index(), key=lambda f: f[2], reverse=True):
+        tg = tags_of(rel)
+        if groups and not all(any(t in tg for t in ts) for ts in groups.values()):
+            continue          # inside one group (tiktok + youtube) = ANY of them; different groups must all match
+        if words:
+            hay = rel.lower() + " " + " ".join(tg)
+            if not all(w in hay for w in words):
+                continue
+        out.append(_item(rel, size, mt, False))
+        if len(out) >= (200 if recent else 600):
+            break
+    return jsonify(success=True, items=out)
+
+
+@app.route("/fs/tags")
+def fs_tags():
+    counts, total = {}, 0
+    for rel, size, _mt in fs_index():
+        total += size
+        for t in tags_of(rel):
+            counts[t] = counts.get(t, 0) + 1
+    tags = sorted(({"name": k, "count": v, "group": tag_group(k)} for k, v in counts.items()),
+                  key=lambda x: (-x["count"], x["name"]))
+    return jsonify(success=True, tags=tags, files=len(fs_index()), total_h=human(total),
+                   free_h=human(shutil.disk_usage(BASE_DIR).free))
+
+
+def _paths(d, key="paths"):
+    v = d.get(key)
+    return [x for x in (v if isinstance(v, list) else [])[:500] if isinstance(x, str)]
+
+
+@app.route("/fs/tag", methods=["POST"])
+def fs_tag():
+    d = json_body()
+    add = {x for x in (_tagname(t) for t in (d.get("add") or [])[:30]) if x}
+    rem = {x for x in (_tagname(t) for t in (d.get("remove") or [])[:30]) if x}
+    with tlock:
+        for rel in _paths(d):
+            ap = fs_abs(rel)
+            if ap is None or ap == BASE_DIR or not ap.exists():
+                continue
+            key = fs_rel(ap)
+            cur = (set(manual_tags.get(key, ())) | add) - rem
+            if cur:
+                manual_tags[key] = sorted(cur)[:30]
+            else:
+                manual_tags.pop(key, None)
+        _save(TAGS_FILE, manual_tags)
+    fs_dirty()
+    return jsonify(success=True)
+
+
+@app.route("/fs/rename", methods=["POST"])
+def fs_rename():
+    d = json_body()
+    ap, name = fs_abs(d.get("path")), str(d.get("name") or "").strip()
+    if ap is None or ap == BASE_DIR or not ap.exists():
+        return jsonify(success=False, message="Not found."), 404
+    if ap.parent == BASE_DIR:
+        return jsonify(success=False, message="The site folders cannot be renamed."), 400
+    if not _name_ok(name):
+        return jsonify(success=False, message="That name is not allowed."), 400
+    dst = ap.with_name(name)
+    if dst.exists():
+        return jsonify(success=False, message="Something with that name already exists."), 409
+    try:
+        ap.rename(dst)
+    except OSError as exc:
+        return jsonify(success=False, message=f"Could not rename: {exc.strerror}"), 500
+    _retag(fs_rel(ap), fs_rel(dst))
+    fs_dirty()
+    return jsonify(success=True, path=fs_rel(dst))
+
+
+@app.route("/fs/mkdir", methods=["POST"])
+def fs_mkdir():
+    d = json_body()
+    parent, name = fs_abs(d.get("path")), str(d.get("name") or "").strip()
+    if parent is None or parent == BASE_DIR or not parent.is_dir():
+        return jsonify(success=False, message="Open a folder inside a site folder first."), 400
+    if not _name_ok(name):
+        return jsonify(success=False, message="That name is not allowed."), 400
+    try:
+        (parent / name).mkdir()
+    except FileExistsError:
+        return jsonify(success=False, message="That folder already exists."), 409
+    except OSError as exc:
+        return jsonify(success=False, message=f"Could not create it: {exc.strerror}"), 500
+    fs_dirty()
+    return jsonify(success=True, path=fs_rel(parent / name))
+
+
+@app.route("/fs/move", methods=["POST"])
+def fs_move():
+    d = json_body()
+    dest = fs_abs(d.get("dest"))
+    if dest is None or dest == BASE_DIR or not dest.is_dir():
+        return jsonify(success=False, message="Choose a folder inside a site folder."), 400
+    moved = skipped = 0
+    for rel in _paths(d):
+        src = fs_abs(rel)
+        if src is None or src == BASE_DIR or src.parent == BASE_DIR or not src.exists():
+            skipped += 1; continue
+        target = dest / src.name
+        if dest == src or src in dest.parents or target.exists():
+            skipped += 1; continue
+        try:
+            shutil.move(str(src), str(target))
+        except OSError:
+            skipped += 1; continue
+        _retag(fs_rel(src), fs_rel(target))
+        moved += 1
+    fs_dirty()
+    return jsonify(success=True, moved=moved, skipped=skipped)
+
+
+@app.route("/fs/delete", methods=["POST"])
+def fs_delete():
+    done = 0
+    for rel in _paths(json_body()):
+        ap = fs_abs(rel)
+        if ap is None or ap == BASE_DIR or ap.parent == BASE_DIR or not ap.exists():
+            continue
+        try:
+            shutil.rmtree(ap) if ap.is_dir() and not ap.is_symlink() else ap.unlink()
+        except OSError:
+            continue
+        _retag(fs_rel(ap), None)
+        done += 1
+        parent, root = ap.parent, (BASE_DIR / rel.split("/")[0]).resolve()
+        while parent != root and parent != BASE_DIR:                  # tidy up emptied folders
+            try:
+                if any(parent.iterdir()):
+                    break
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+    fs_dirty()
+    return jsonify(success=True, deleted=done)
+
+
+@app.route("/fs/zip")
+def fs_zip():
+    tmp, count = tempfile.TemporaryFile(), 0
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as z:
+        for rel in request.args.getlist("p")[:200]:
+            ap = fs_abs(rel)
+            if ap is None or ap == BASE_DIR:
+                continue
+            files = [ap] if ap.is_file() else [f for f in ap.rglob("*") if f.is_file()] if ap.is_dir() else []
+            for f in files:
+                if not is_partial(f.name):
+                    z.write(f, arcname=f.relative_to(BASE_DIR).as_posix()); count += 1
+    if not count:
+        return jsonify(success=False, message="Nothing to zip."), 404
+    tmp.seek(0)
+    return send_file(tmp, mimetype="application/zip", as_attachment=True, download_name="media-hub.zip")
+
+
+@app.route("/fs/thumb")
+def fs_thumb():
+    """Small preview picture for a photo or video (made with ffmpeg once, then cached)."""
+    ap = fs_abs(request.args.get("path"))
+    if ap is None or not ap.is_file() or file_kind(ap.name) not in ("video", "photo"):
+        return "", 404
+    st = ap.stat()
+    out = THUMB_DIR / (hashlib.sha1(f"{fs_rel(ap)}|{st.st_mtime_ns}|{st.st_size}".encode()).hexdigest() + ".jpg")
+    if not out.is_file():
+        ff = shutil.which("ffmpeg")
+        if not ff:
+            return "", 404
+        with _thumb_sem:
+            for seek in ((["-ss", "1"], []) if file_kind(ap.name) == "video" else ([],)):
+                if out.is_file():
+                    break
+                tmp = out.with_name(f"{out.stem}.{threading.get_ident()}.tmp.jpg")
+                try:
+                    subprocess.run([ff, "-y", "-nostdin", "-loglevel", "error", *seek, "-i", str(ap), "-frames:v", "1",
+                                    "-vf", "scale=360:-2", "-q:v", "4", str(tmp)],
+                                   timeout=25, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    os.replace(tmp, out)
+                except (subprocess.SubprocessError, OSError):
+                    tmp.unlink(missing_ok=True)
+    if not out.is_file():
+        return "", 404
+    return send_file(out, mimetype="image/jpeg", max_age=86400)
+
+
+# ---- password for the file browser (checked on the SERVER, so the files really are hidden) ----
+FILES_PIN = os.environ.get("HUB_FILES_PIN", "145234").strip()
+_FILES_SECRET = os.urandom(32)          # a restart locks everything again
+_pin_fail = {}                          # ip -> [wrong tries, blocked until]
+
+
+def _files_sig(exp):
+    return hmac.new(_FILES_SECRET, str(exp).encode(), hashlib.sha256).hexdigest()
+
+
+def files_unlocked():
+    try:
+        exp, sig = request.cookies.get("hub_files", "").split(".", 1)
+        return int(exp) > time.time() and hmac.compare_digest(sig, _files_sig(exp))
+    except ValueError:
+        return False
+
+
+def _job_allows(path, jid):
+    """A finished download may be saved by the browser that started it (needs the private job id), even while locked."""
+    cat, _, name = path[len("/files/"):].partition("/")
+    mine = set(request.cookies.get("hub_jobs", "").split(",")) | {str(jid or "")}      # jobs THIS browser started
+    with lock:
+        for i in mine:
+            job = jobs.get(i) if i else None
+            if job and job.get("category") == cat and name in (job.get("files") or []):
+                return True
+    return False
+
+
+def _remember_jobs(resp, *ids):
+    """Remember which downloads this browser started, so it can always save them - no password needed."""
+    cur = [x for x in request.cookies.get("hub_jobs", "").split(",") if re.fullmatch(r"[0-9a-f]{8,12}", x)]
+    resp.set_cookie("hub_jobs", ",".join((cur + [i for i in ids if i])[-60:]), httponly=True, samesite="Lax", max_age=7 * 24 * 3600)
+    return resp
+
+
+@app.before_request
+def require_files_pin():
+    p = request.path
+    if p in ("/fs/unlock", "/fs/lock"):
+        return None
+    if p.startswith("/files/"):
+        if request.method == "GET" and _job_allows(p, request.args.get("j")):
+            return None
+    elif not (p.startswith("/fs/") or p == "/list-files"):
+        return None
+    if files_unlocked():
+        return None
+    return jsonify(success=False, locked=True, message="The files are locked. Enter the password first."), 403
+
+
+@app.route("/fs/unlock", methods=["POST"])
+def fs_unlock():
+    ip, now = request.remote_addr or "?", time.time()
+    st = _pin_fail.get(ip, [0, 0.0])
+    if st[1] > now:
+        return jsonify(success=False, message=f"Too many wrong tries. Wait {int(st[1] - now) + 1} seconds."), 429
+    if hmac.compare_digest(str(json_body().get("pin") or "").encode(), FILES_PIN.encode()):
+        _pin_fail.pop(ip, None)
+        exp = int(now) + 6 * 3600
+        resp = jsonify(success=True)
+        resp.set_cookie("hub_files", f"{exp}.{_files_sig(exp)}", httponly=True, samesite="Lax", max_age=6 * 3600)
+        return resp
+    st[0] += 1
+    if st[0] >= 5:
+        st = [0, now + 60]
+    _pin_fail[ip] = st
+    return jsonify(success=False, message="Wrong password."), 403
+
+
+@app.route("/fs/lock", methods=["POST"])
+def fs_lock():
+    resp = jsonify(success=True)
+    resp.delete_cookie("hub_files")
+    return resp
+
+
+# ---- sending files to the phone: share-sheet Shortcut, convert, install as an app ----
+PHOTO_EXT = (".mp4", ".m4v", ".mov", ".jpg", ".jpeg", ".png", ".gif", ".heic")       # what the Photos app accepts
+PHOTO_MIME = {".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+              ".png": "image/png", ".gif": "image/gif", ".heic": "image/heic"}
+
+
+def phone_key():
+    k = settings.get("phone_key")
+    if not k:
+        k = settings["phone_key"] = secrets.token_urlsafe(18)
+        _save(SETTINGS_FILE, settings)
+    return k
+
+
+def _phone_ok():
+    return hmac.compare_digest(str(request.args.get("key") or ""), phone_key())
+
+
+def phone_files(job, limit=200):
+    """Photos-ready files: videos and photos, but not the cover picture that sits next to a video."""
+    names = [f for f in (job.get("files") or []) if f.lower().endswith(PHOTO_EXT)]
+    vids = {os.path.splitext(f)[0] for f in names if f.lower().endswith((".mp4", ".m4v", ".mov"))}
+    return [f for f in names if f.lower().endswith((".mp4", ".m4v", ".mov")) or os.path.splitext(f)[0] not in vids][:limit]
+
+
+def _lan_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("10.255.255.255", 1))             # nothing is sent: this only asks which network address would be used
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+def lan_base():
+    """The address the PHONE must use. A browser on 'localhost' would otherwise put 'localhost' into the QR code."""
+    u = urlparse(request.host_url)
+    host = _lan_ip() if (u.hostname or "") in ("localhost", "127.0.0.1", "::1") else u.hostname
+    return f"{u.scheme}://{host}" + (f":{u.port}" if u.port else "")
+
+
+def _zip_pairs(pairs, first_no=1):
+    tmp, n = tempfile.TemporaryFile(), 0
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as z:
+        for i, (cat, rel) in enumerate(pairs, first_no):
+            p = safe_path(cat, rel)
+            if p:
+                z.write(p, arcname=f"{i:03d}_{p.name}"); n += 1
+    if not n:
+        tmp.close()
+        return None
+    tmp.seek(0)
+    return send_file(tmp, mimetype="application/zip", as_attachment=True, download_name="photos.zip")
+
+
+@app.route("/phone/grab", methods=["POST"])
+def phone_grab():
+    """Share-sheet Shortcut: start a download from a link and wait (up to 50 s) so it can go straight into Photos."""
+    if not _phone_ok():
+        return jsonify(success=False, message="Wrong key."), 403
+    raw = request.get_data(as_text=True) or ""
+    m = re.search(r"https?://[^\s\"']+", str(json_body().get("url") or "") or raw)
+    if not m:
+        return jsonify(success=False, message="No link found."), 400
+    job, err = enqueue("url", m.group(0), options={"kind": "video"})
+    if err:
+        return jsonify(success=False, message=err), 400
+    end = time.time() + 50
+    while time.time() < end and job["status"] in ("queued", "running"):
+        time.sleep(0.5)
+    if job["status"] == "error":
+        return jsonify(success=False, message=job["message"]), 500
+    if job["status"] != "done":
+        return jsonify(success=False, working=True, job=job["id"], message="Still downloading - it will be in Media Hub when it finishes."), 202
+    names = phone_files(job, 40)
+    resp = _zip_pairs([(job["category"], n) for n in names]) if names else None
+    return resp or (jsonify(success=False, message="Downloaded, but Photos cannot take this format. Turn on 'iPhone-friendly (H.264)' in Settings."), 415)
+
+
+@app.route("/fs/phonekey", methods=["GET", "POST"])            # under /fs/ = needs the file password
+def fs_phonekey():
+    if request.method == "POST":
+        settings["phone_key"] = secrets.token_urlsafe(18)
+        _save(SETTINGS_FILE, settings)
+    return jsonify(success=True, key=phone_key(), base=lan_base())
+
+
+# ---- make old videos iPhone-friendly (H.264 / .mp4) ----
+def _vcodec(path):
+    ff = shutil.which("ffprobe")
+    if not ff:
+        return ""
+    try:
+        r = subprocess.run([ff, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(path)],
+                           capture_output=True, text=True, timeout=30)
+        return r.stdout.strip().lower()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def convert_worker(job, rels):
+    cancel = job_cancel(job)
+    try:
+        ff = _need_ffmpeg()
+    except RuntimeError as exc:
+        return finish_err(job, str(exc))
+    todo, fine = [], 0
+    for rel in rels:
+        ap = fs_abs(rel)
+        if ap is None or not ap.is_file():
+            continue
+        if _vcodec(ap) in ("h264", "hevc") and ap.suffix.lower() in (".mp4", ".mov", ".m4v"):
+            fine += 1
+        else:
+            todo.append(ap)
+    made = 0
+    for i, ap in enumerate(todo):
+        if cancel.is_set():
+            return finish_err(job, "Cancelled by user")
+        update(job, message=f"Converting {i + 1}/{len(todo)}: {ap.name[:40]}", progress=int(i / len(todo) * 100))
+        dst, k = ap.with_name(f"{ap.stem} [iphone].mp4"), 1
+        while dst.exists():
+            k += 1
+            dst = ap.with_name(f"{ap.stem} [iphone {k}].mp4")
+        tmp = dst.with_name(f"{dst.stem}.{job['id']}.fxtmp.mp4")
+        try:
+            _ffmpeg([ff, "-y", "-nostdin", "-loglevel", "error", "-i", str(ap), "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "veryfast",
+                     "-crf", "21", "-pix_fmt", "yuv420p", "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(tmp)],
+                    timeout=3600, cancel=cancel)
+            os.replace(tmp, dst); made += 1
+        except DownloadCancelled:
+            tmp.unlink(missing_ok=True)
+            return finish_err(job, "Cancelled by user")
+        except (RuntimeError, subprocess.TimeoutExpired) as exc:
+            tmp.unlink(missing_ok=True)
+            app.logger.warning("convert failed for %s: %s", ap, exc)
+    fs_dirty()
+    finish_ok(job, [], f"Made {made} iPhone-friendly cop{'y' if made == 1 else 'ies'} ([iphone].mp4)" + (f" · {fine} already fine" if fine else ""), fresh=[])
+
+
+@app.route("/fs/convert", methods=["POST"])
+def fs_convert():
+    rels = []
+    for rel in _paths(json_body()):
+        ap = fs_abs(rel)
+        if ap is None or ap == BASE_DIR:
+            continue
+        if ap.is_file() and file_kind(ap.name) == "video":
+            rels.append(fs_rel(ap))
+        elif ap.is_dir():
+            rels += [fs_rel(f) for f in sorted(ap.rglob("*")) if f.is_file() and file_kind(f.name) == "video" and " [iphone" not in f.name][:100]
+    if not rels:
+        return jsonify(success=False, message="No videos in your selection."), 400
+    if not shutil.which("ffmpeg"):
+        return jsonify(success=False, message="ffmpeg is not installed on the server."), 400
+    job = {"id": uuid.uuid4().hex[:12], "category": rels[0].split("/")[0], "label": f"Converting {len(rels)} video(s)", "status": "queued", "progress": 0,
+           "message": "Waiting…", "speed": "", "eta": "", "files": [], "fresh": [], "created": time.time(), "finished": None, "silent": True, "batch": None}
+    cancel = threading.Event()
+    with lock:
+        jobs[job["id"]], cancels[job["id"]] = job, cancel
+    pool.submit(_run_safely, convert_worker, job, rels)
+    return jsonify(success=True, job_id=job["id"], count=len(rels))
+
+
+# ---- install as an app (home-screen icon, full screen) ----
+_icons = {}
+
+
+def _icon_png(n):
+    if n in _icons:
+        return _icons[n]
+    c0, c1, ss = (139, 92, 246), (34, 211, 238), 2
+
+    def white(u, v):                                   # is this point part of the white "download" arrow?
+        return ((0.43 <= u <= 0.57 and 0.24 <= v <= 0.54) or (0.54 <= v <= 0.74 and abs(u - 0.5) <= 0.74 - v)
+                or (0.26 <= u <= 0.74 and 0.79 <= v <= 0.84))
+    raw = bytearray()
+    for y in range(n):
+        raw.append(0)
+        for x in range(n):
+            w = sum(white((x + (a + .5) / ss) / n, (y + (b + .5) / ss) / n) for a in range(ss) for b in range(ss)) / (ss * ss)
+            t = (x + y) / (2 * n)
+            for i in range(3):
+                raw.append(int((c0[i] + (c1[i] - c0[i]) * t) * (1 - w) + 255 * w))
+
+    def chunk(kind, d):
+        return struct.pack(">I", len(d)) + kind + d + struct.pack(">I", zlib.crc32(kind + d) & 0xffffffff)
+    _icons[n] = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", n, n, 8, 2, 0, 0, 0))
+                 + chunk(b"IDAT", zlib.compress(bytes(raw), 6)) + chunk(b"IEND", b""))
+    return _icons[n]
+
+
+@app.route("/icon/<int:size>.png")
+def pwa_icon(size):
+    return app.response_class(_icon_png(max(64, min(512, size))), mimetype="image/png", headers={"Cache-Control": "public, max-age=604800"})
+
+
+@app.route("/manifest.webmanifest")
+def pwa_manifest():
+    icons = [{"src": f"/icon/{s}.png", "sizes": f"{s}x{s}", "type": "image/png", "purpose": "any maskable"} for s in (192, 512)]
+    return app.response_class(json.dumps({"name": "Media Hub", "short_name": "Media Hub", "start_url": "/", "scope": "/", "display": "standalone",
+                                          "background_color": "#07080f", "theme_color": "#07080f", "icons": icons}), mimetype="application/manifest+json")
+
+
+@app.route("/sw.js")
+def pwa_sw():
+    js = "self.addEventListener('install',()=>self.skipWaiting());self.addEventListener('activate',e=>e.waitUntil(self.clients.claim()));self.addEventListener('fetch',()=>{});"
+    return app.response_class(js, mimetype="application/javascript", headers={"Cache-Control": "no-cache"})
+
+
+manual_tags.update(_load(TAGS_FILE, {}))
+
+
 watches.update(_load(WATCH_FILE, {}))
 settings.update(_load(SETTINGS_FILE, {}))
 for _w in watches.values():
     _w["busy"] = False
 threading.Thread(target=scheduler_loop, daemon=True, name="scheduler").start()
+
+
+# --------------------------------------------------------------------------- #
+# Security check: warn (or refuse to start) when the site is left with the default passwords
+# --------------------------------------------------------------------------- #
+DEFAULT_FILES_PIN = "145234"
+
+
+def security_problems():
+    """List of things that make private files easy to reach. Empty list = fine."""
+    out = []
+    if not HUB_TOKEN:
+        out.append({"id": "token", "text": "No access token is set (HUB_TOKEN). Anyone on your network - or your Tailscale network - can open this page and your files screen."})
+    elif len(HUB_TOKEN) < 12:
+        out.append({"id": "token_short", "text": "HUB_TOKEN is short. Use at least 12 random characters."})
+    if FILES_PIN == DEFAULT_FILES_PIN:
+        out.append({"id": "pin_default", "text": "The file password is still the default (145234). Set your own with HUB_FILES_PIN."})
+    elif len(FILES_PIN) < 8:
+        out.append({"id": "pin_short", "text": "The file password is short. Use 8 or more characters (HUB_FILES_PIN)."})
+    return out
+
+
+@app.route("/security/status")
+def security_status():
+    return jsonify(success=True, problems=security_problems(), strict=os.environ.get("HUB_STRICT", "") == "1")
+
+
+def _security_startup():
+    probs = security_problems()
+    if not probs:
+        return
+    bar = "!" * 70
+    print("\n" + bar + "\n  SECURITY WARNING - your private files are not well protected:")
+    for p in probs:
+        print("   - " + p["text"])
+    print("  Fix: set HUB_TOKEN and HUB_FILES_PIN as environment variables (docker-compose 'environment:'), then restart.")
+    print("  Add HUB_STRICT=1 to make the server refuse to start until this is fixed.\n" + bar + "\n", flush=True)
+    if os.environ.get("HUB_STRICT", "") == "1":
+        raise SystemExit("HUB_STRICT=1: refusing to start with weak or missing passwords.")
+
+
+_security_startup()
 
 
 if __name__ == "__main__":

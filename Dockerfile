@@ -12,7 +12,7 @@ RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o 
     && chmod a+rx /usr/local/bin/yt-dlp
 
 # Install Python packages (yt-dlp added here to fix the ModuleNotFoundError!)
-RUN pip install --no-cache-dir flask gunicorn snapchat-dl gallery-dl yt-dlp
+RUN pip install --no-cache-dir flask gunicorn snapchat-dl gallery-dl yt-dlp "python-telegram-bot>=21,<23" httpx
 
 # Copy your project files into the container
 COPY . .
@@ -21,4 +21,4 @@ COPY . .
 EXPOSE 5000
 
 # The command to start your production server
-CMD ["gunicorn", "-w", "1", "--threads", "8", "-b", "0.0.0.0:5000", "app:app"]
+CMD ["sh", "-c", "(while true; do python bot.py; sleep 5; done) & exec gunicorn -w 1 --threads 8 -b 0.0.0.0:5000 app:app"]
