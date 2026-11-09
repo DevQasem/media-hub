@@ -2066,3 +2066,33 @@ async function lvOpt(key, val, msg) {
   tog('loHelper', 'live_helper', 'Helper on', 'Helper off - only TikTok itself is asked');
   safeBind('loChatKeySave', 'click', async () => { await lvOpt('live_chat_key', $('loChatKey').value.trim(), $('loChatKey').value.trim() ? 'API key saved' : 'API key removed'); lvOptsLoad(); });
 })();
+
+
+/* ================= Live: TikTok login ================= */
+function ttLoginPaint(st) {
+  const el = $('ttLoginStatus'); if (!el || !st) return;
+  let t, cls;
+  if (!st.saved) { t = '⚪ Not logged in - recording as a logged-out viewer'; cls = ''; }
+  else if (!st.has_session) { t = '⚠ Saved, but there is no login in it (no “sessionid”). Export again while logged in.'; cls = 'warn'; }
+  else if (st.session_expired) { t = '⚠ The login has expired - export a fresh cookies.txt.'; cls = 'warn'; }
+  else if (st.user) { t = `🟢 Logged in as @${st.user}`; cls = 'ok'; }
+  else { t = '🟡 Login saved - TikTok did not confirm the account right now (press Check later)'; cls = 'mid'; }
+  if (st.expires && !st.session_expired && st.has_session) t += ` · valid until ${new Date(st.expires * 1000).toLocaleDateString()}`;
+  el.textContent = t; el.className = 'lvloginst ' + cls;
+  $('ttRemove').disabled = !st.saved;
+}
+async function ttLoginLoad(check) { const r = await api('/tiktok-cookies' + (check ? '?check=1' : '')); if (r.success) ttLoginPaint(r); }
+async function ttLoginSave() {
+  const f = $('ttFile').files[0]; let r;
+  if (f) { const fd = new FormData(); fd.append('file', f); r = await api('/tiktok-cookies', {method:'POST', body:fd}); }
+  else r = await post('/tiktok-cookies', {text: $('ttText').value});
+  toast(r.message || (r.success ? 'Saved' : 'Could not save'));
+  if (r.success) { $('ttText').value = ''; $('ttFile').value = ''; ttLoginPaint(r); lvLoad(); }
+}
+(function initTtLogin() {
+  if (!$('ttSave')) return;
+  safeBind('ttSave', 'click', ttLoginSave);
+  safeBind('ttCheck', 'click', async () => { $('ttLoginStatus').textContent = 'Checking with TikTok…'; await ttLoginLoad(true); });
+  safeBind('ttRemove', 'click', async () => { if (!confirm('Remove the TikTok login from Media Hub?')) return; const r = await api('/tiktok-cookies', {method:'DELETE'}); toast(r.message || 'Removed'); ttLoginPaint(r); lvLoad(); });
+  $('lvOptBtn').addEventListener('click', () => { if (!$('lvOpts').hidden) ttLoginLoad(true); });
+})();

@@ -284,9 +284,9 @@ _COOKIE_DOMAIN_RE = re.compile(r"^\.?[A-Za-z0-9.\-]+$")
 _COOKIE_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-%]+$")
 
 
-def parse_cookie_text(text: str):
+def parse_cookie_text(text: str, site: str = "instagram.com", label: str = "Instagram"):
     """
-    Check a pasted/uploaded cookies.txt (Netscape format) and keep ONLY instagram.com cookies
+    Check a pasted/uploaded cookies.txt (Netscape format) and keep ONLY that site's cookies (instagram.com by default)
     (a browser export can hold cookies of every site - those must never be stored here).
     Returns (cleaned file text, kept_count, ignored_count) or raises ValueError(simple message).
     """
@@ -319,14 +319,14 @@ def parse_cookie_text(text: str):
                 and secure.upper() in ("TRUE", "FALSE") and _COOKIE_NAME_RE.match(name)
                 and re.fullmatch(r"-?\d+(\.\d+)?", expiry)):
             continue
-        if not host_is(domain.lstrip("."), "instagram.com"):
+        if not host_is(domain.lstrip("."), site):
             ignored += 1
             continue
         exp = max(0, int(float(expiry)))
         kept.append("\t".join([domain, flag.upper(), path, secure.upper(), str(exp), name, value]))
     if not kept:
-        raise ValueError("No Instagram cookies found. Open instagram.com while logged in, export again "
-                         "(Netscape / cookies.txt format) and make sure the file is the Instagram one.")
+        raise ValueError(f"No {label} cookies found. Open {site} while logged in, export again "
+                         f"(Netscape / cookies.txt format) and make sure the file is the {label} one.")
     return "# Netscape HTTP Cookie File\n" + "\n".join(kept) + "\n", len(kept), ignored
 
 
@@ -2375,12 +2375,83 @@ class LiveError(Exception):
     pass
 
 
+TT_COOKIES_FILE = DATA_DIR / "tiktok_cookies.txt"
+TT_SESSION_NAMES = ("sessionid", "sessionid_ss")
+_tt_who = {"mtime": None, "user": ""}
+
+
+def tt_cookies():
+    """[(domain, path, name, value, expiry)] from the saved TikTok login, or []."""
+    try:
+        text = TT_COOKIES_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    out = []
+    for line in text.splitlines():
+        f = line.split("\t")
+        if len(f) == 7 and not line.startswith("#"):
+            out.append((f[0], f[2], f[5], f[6], int(f[4] or 0)))
+    return out
+
+
+def _tt_cookie_mtime():
+    try:
+        return TT_COOKIES_FILE.stat().st_mtime
+    except OSError:
+        return None
+
+
 def _tt_session():
+    """One browser-like session per thread; it picks up a new/removed TikTok login by itself."""
+    if _cffi is None:
+        return None
+    mt = _tt_cookie_mtime()
     s = getattr(_tt_local, "s", None)
-    if s is None and _cffi is not None:
+    if s is None or getattr(_tt_local, "mt", "x") != mt:
         s = _tt_local.s = _cffi.Session(impersonate="chrome136")
         s.headers.update(TT_HEADERS)
+        for dom, path, name, value, _exp in tt_cookies():
+            try:
+                s.cookies.set(name, value, domain=dom, path=path or "/")
+            except Exception:  # noqa: BLE001
+                pass
+        _tt_local.mt = mt
     return s
+
+
+def _tt_cookie_header():
+    """Cookie header for the plain (no curl_cffi) fallback."""
+    return "; ".join(f"{n}={v}" for _d, _p, n, v, _e in tt_cookies())
+
+
+def tt_login_user(force=False):
+    """The logged-in TikTok username ('' = not logged in / not working). Asked once per saved login."""
+    mt = _tt_cookie_mtime()
+    if mt is None:
+        return ""
+    if not force and _tt_who["mtime"] == mt:
+        return _tt_who["user"]
+    user = ""
+    try:
+        d = _tt_json(f"{TT_WEB}/passport/web/account/info/", {"aid": 1459})
+        data = d.get("data") or {}
+        user = str(data.get("username") or data.get("unique_id") or data.get("screen_name") or "")
+    except LiveError:
+        user = _tt_who["user"] if _tt_who["mtime"] == mt else ""
+    _tt_who.update(mtime=mt, user=user)
+    return user
+
+
+def tt_login_status(check=False):
+    """What the Options panel shows. Never returns cookie values."""
+    ck = tt_cookies()
+    sess = [c for c in ck if c[2] in TT_SESSION_NAMES]
+    exp = max((c[4] for c in sess), default=0) or None
+    st = {"saved": bool(ck), "count": len(ck), "has_session": bool(sess), "expires": exp,
+          "session_expired": bool(exp and exp < time.time()), "saved_at": _tt_cookie_mtime(), "user": ""}
+    if ck and check:
+        st["user"] = tt_login_user()
+    return st
 
 
 def _tt_json(url, params=None, timeout=15):
@@ -2392,7 +2463,10 @@ def _tt_json(url, params=None, timeout=15):
         if s is not None:
             text = s.get(url, timeout=timeout).text
         else:
-            req = urllib.request.Request(url, headers=TT_HEADERS)
+            hdr = dict(TT_HEADERS)
+            if tt_cookies():
+                hdr["Cookie"] = _tt_cookie_header()
+            req = urllib.request.Request(url, headers=hdr)
             text = urllib.request.urlopen(req, timeout=timeout).read(4 * 1024 * 1024).decode("utf-8", "replace")
     except Exception as exc:  # noqa: BLE001
         raise LiveError(f"Could not reach TikTok: {exc}") from exc
@@ -2928,7 +3002,7 @@ def live_overview():
                  "lives_seen": len(w.get("live_starts") or [])} for w in sorted(ws, key=lambda w: w["created"])]
     return jsonify(success=True, accounts=accounts, recording=recs, intervals=LIVE_INTERVALS + INTERVALS[:2],
                    quality=settings.get("live_quality", "best"),
-                   chat_on=bool(settings.get("live_chat")),
+                   chat_on=bool(settings.get("live_chat")), login=tt_login_status()["has_session"],
                    helper=settings.get("live_helper", True), max_hours=settings.get("live_max_hours", 6),
                    ready=_cffi is not None, now=time.time())
 
@@ -2971,6 +3045,39 @@ def fs_lives():
     total = sum(x["size"] for x in out)
     return jsonify(success=True, items=out[:300], count=len(out), total_h=human(total),
                    hours=round(sum(x["duration"] for x in out) / 3600, 1))
+
+
+@app.route("/tiktok-cookies", methods=["GET", "POST", "DELETE"])
+def tiktok_cookies():
+    """Status / save / remove the TikTok login (cookies.txt). Cookie values are never sent back."""
+    if request.method == "DELETE":
+        TT_COOKIES_FILE.unlink(missing_ok=True)
+        _tt_who.update(mtime=None, user="")
+        return jsonify(success=True, message="TikTok login removed.", **tt_login_status())
+    if request.method == "POST":
+        up = request.files.get("file")
+        text = up.read(COOKIE_MAX_BYTES + 1).decode("utf-8", "replace") if up else json_body().get("text")
+        if not isinstance(text, str) or not text.strip():
+            return jsonify(success=False, message="Nothing to save - choose the cookies.txt file or paste its text."), 400
+        try:
+            clean, kept, ignored = parse_cookie_text(text, "tiktok.com", "TikTok")
+        except ValueError as exc:
+            return jsonify(success=False, message=str(exc)), 400
+        try:
+            write_private(TT_COOKIES_FILE, clean)
+        except OSError as exc:
+            return jsonify(success=False, message=f"Could not save the file: {exc.strerror}"), 500
+        st = tt_login_status(check=True)
+        if not st["has_session"]:
+            msg = f"Saved {kept} TikTok cookies, but there is no “sessionid” - you were probably not logged in in that browser."
+        elif st["user"]:
+            msg = f"Logged in to TikTok as @{st['user']}."
+        else:
+            msg = f"Saved {kept} TikTok cookies. TikTok did not confirm the account right now - recordings will still use it."
+        if ignored:
+            msg += f" ({ignored} cookies from other sites were ignored on purpose.)"
+        return jsonify(success=True, message=msg, **st)
+    return jsonify(success=True, **tt_login_status(check=request.args.get("check") == "1"))
 
 
 @app.route("/live/status")

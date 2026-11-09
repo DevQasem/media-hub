@@ -222,6 +222,24 @@
           <p class="hint">The helper is only asked when TikTok refuses the direct check; it then sees which username is checked.</p>
           <p class="hint" id="loReady"></p>
         </section>
+        <section class="lvlogin">
+          <h4>🔑 TikTok login</h4>
+          <p class="lvloginst" id="ttLoginStatus">Not logged in</p>
+          <p class="hint">Logged in, Media Hub can record lives TikTok hides from logged-out viewers (18+, followers-only, some regions) and gets the higher qualities some lives keep for logged-in viewers.</p>
+          <details class="steps"><summary>How do I get my TikTok cookies.txt?</summary>
+            <ol>
+              <li>On a <b>computer</b>, log in to <b>tiktok.com</b> in Chrome, Edge or Firefox - with a <b>spare account</b>.</li>
+              <li>Install the free extension <b>“Get cookies.txt LOCALLY”</b>.</li>
+              <li>While on tiktok.com, click the extension and press <b>Export</b> (format: <b>Netscape</b>).</li>
+              <li>Choose that file below, or paste its text, then press <b>Save login</b>.</li>
+              <li>Don't press “Log out” on TikTok in that browser, or the login stops working.</li>
+            </ol>
+          </details>
+          <p class="hint lvwarn">Use a spare account: TikTok can limit accounts that record a lot. Only tiktok.com cookies are kept; the rest of the file is thrown away. The chat never uses this login.</p>
+          <input type="file" id="ttFile" accept=".txt,text/plain">
+          <textarea id="ttText" placeholder="…or paste the text of cookies.txt here" spellcheck="false" autocomplete="off"></textarea>
+          <div class="lvkey"><button class="btn primary" id="ttSave">💾 Save login</button><button class="btn ghost" id="ttCheck">↻ Check</button><button class="btn ghost lvdanger" id="ttRemove">🗑 Remove</button></div>
+        </section>
       </div>
     </div>
 
