@@ -1015,3 +1015,35 @@ html[data-scheme="light"] .lvcover { opacity:.14; }
 
 /* the Live badge in the side menu and tab bar uses TikTok red */
 #rnLive, #tbLive { background:#fe2c55 !important; color:#fff !important; }
+
+
+/* ================= Live: options + chat ================= */
+.lvhr { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.lvoptbtn { padding:7px 14px; font-size:.82rem; color:var(--text); }
+.lvoptbtn.on { box-shadow:inset 0 0 0 1.5px var(--tt-c); color:var(--tt-c); }
+.lvopts { margin:0 0 14px; padding:16px; border:1px solid var(--tt-line); border-radius:18px; background:var(--tt-bg); backdrop-filter:blur(12px); animation:rise .35s var(--ease); }
+.lvopts[hidden] { display:none; }
+.lvoptgrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr)); gap:16px; }
+.lvoptgrid section { display:flex; flex-direction:column; gap:10px; min-width:0; }
+.lvoptgrid h4 { margin:0; font-size:.95rem; }
+.lvoptgrid .hint { margin:0; font-size:.76rem; }
+.lvwarn { color:var(--amber) !important; }
+.lvkey { display:flex; gap:6px; } .lvkey input { flex:1; min-width:0; padding:9px 11px; border:1px solid var(--line); border-radius:11px; background:var(--field); color:var(--text); font:inherit; font-size:.86rem; }
+.lvsw { display:flex; align-items:center; gap:10px; font-size:.86rem; cursor:pointer; user-select:none; }
+.lvsw input { position:absolute; opacity:0; pointer-events:none; }
+.lvsw .trk { flex:0 0 38px; height:22px; border-radius:99px; background:var(--card2); box-shadow:inset 0 0 0 1px var(--line); position:relative; transition:background .25s; }
+.lvsw .trk::after { content:""; position:absolute; top:3px; left:3px; width:16px; height:16px; border-radius:50%; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.4); transition:transform .25s var(--ease); }
+.lvsw input:checked + .trk { background:linear-gradient(90deg,var(--tt-c),var(--tt-r)); }
+.lvsw input:checked + .trk::after { transform:translateX(16px); }
+.lvsw input:focus-visible + .trk { outline:2px solid var(--tt-c); outline-offset:2px; }
+.lvchat { margin:0 0 12px; border:1px solid var(--tt-line); border-radius:14px; background:color-mix(in srgb,var(--text) 3%,transparent); overflow:hidden; }
+.lvchatstats { display:flex; gap:12px; flex-wrap:wrap; padding:7px 10px; border-bottom:1px solid var(--tt-line); font-size:.74rem; color:var(--mute); font-variant-numeric:tabular-nums; }
+.lvchatstate { padding:6px 10px; font-size:.74rem; color:var(--amber); border-bottom:1px solid var(--tt-line); }
+.lvfeed { height:170px; overflow-y:auto; padding:6px 10px; display:flex; flex-direction:column; gap:3px; font-size:.8rem; line-height:1.35; scrollbar-width:thin; -webkit-mask:linear-gradient(transparent,#000 22px); mask:linear-gradient(transparent,#000 22px); }
+.lvfeed .cc, .lvfeed .cg { overflow-wrap:anywhere; animation:chipIn .3s var(--ease); }
+.lvfeed .cc b { color:hsl(var(--h) 75% 68%); font-weight:700; }
+html[data-scheme="light"] .lvfeed .cc b { color:hsl(var(--h) 65% 38%); }
+.lvfeed .cg { padding:3px 8px; border-radius:8px; background:linear-gradient(90deg,rgba(251,191,36,.18),transparent); }
+.lvfeed .cg b { color:#fbbf24; } html[data-scheme="light"] .lvfeed .cg b { color:#a16207; }
+.lvfeed .cg em { font-style:normal; font-size:.72rem; color:var(--tt-c); }
+.lvchatwait { margin:auto; color:var(--mute); font-size:.78rem; }

@@ -192,8 +192,38 @@
   <section class="livepage view-live" id="livePage" aria-label="TikTok LIVE">
     <header class="lvhead">
       <div><h2>🔴 TikTok LIVE</h2><p class="hint" style="margin:2px 0 0">Record lives now, or watch accounts and record every time they go live.</p></div>
-      <div class="lvstats" id="lvStats"></div>
+      <div class="lvhr"><div class="lvstats" id="lvStats"></div><button class="btn ghost lvoptbtn" id="lvOptBtn" aria-expanded="false" aria-controls="lvOpts">⚙ Options</button></div>
     </header>
+
+    <div class="lvopts" id="lvOpts" hidden>
+      <div class="lvoptgrid">
+        <section>
+          <h4>🎥 Video</h4>
+          <div class="fld"><label for="loQuality">Quality</label><select id="loQuality"><option value="best">Original - best quality (biggest files)</option><option value="hd">HD - smaller files</option><option value="sd">SD - smallest files</option></select></div>
+          <div class="fld"><label for="loMax">Stop a recording after</label><select id="loMax"><option value="15">15 minutes</option><option value="30">30 minutes</option><option value="45">45 minutes</option><option value="60">1 hour</option><option value="90">1 h 30 min</option><option value="120">2 hours</option><option value="180">3 hours</option><option value="240">4 hours</option><option value="360">6 hours</option><option value="480">8 hours</option><option value="720">12 hours</option><option value="1440">24 hours</option></select></div>
+          <div class="fld"><label for="loKeep">Don't keep lives shorter than</label><select id="loKeep"><option value="0">Keep everything</option><option value="1">1 minute</option><option value="2">2 minutes</option><option value="5">5 minutes</option><option value="10">10 minutes</option></select></div>
+          <div class="fld"><label for="loFree">Stop when free disk space is below</label><select id="loFree"><option value="1">1 GB</option><option value="2">2 GB</option><option value="5">5 GB</option><option value="10">10 GB</option><option value="20">20 GB</option></select></div>
+          <p class="hint">Recordings are copied straight from TikTok - never re-encoded. Stopping by hand always keeps the file.</p>
+        </section>
+        <section>
+          <h4>💬 Chat</h4>
+          <label class="lvsw"><input type="checkbox" id="loChat"><span class="trk"></span><span>Record the live chat</span></label>
+          <label class="lvsw"><input type="checkbox" id="loChatSubs"><span class="trk"></span><span>Add the chat to the video as subtitles</span></label>
+          <p class="hint">Comments and gifts show live on the recording card and are saved as a transcript (<i>.chat.txt</i>). As subtitles, switch them on in VLC or the iPhone player.</p>
+          <p class="hint lvwarn">Chat goes through the <b>Euler Stream</b> signing service, which sees which live room is read. Off by default.</p>
+          <div class="fld"><label for="loChatKey">Euler Stream API key (optional - only raises limits)</label>
+            <div class="lvkey"><input id="loChatKey" type="password" autocomplete="off" spellcheck="false" placeholder="not set"><button class="mini" id="loChatKeySave">Save</button></div></div>
+          <p class="hint" id="loChatReady"></p>
+        </section>
+        <section>
+          <h4>🔔 Alerts &amp; privacy</h4>
+          <label class="lvsw"><input type="checkbox" id="loNotify"><span class="trk"></span><span>Phone alert when someone goes live and when it is saved</span></label>
+          <label class="lvsw"><input type="checkbox" id="loHelper"><span class="trk"></span><span>Use the tikrec.com helper when TikTok blocks the check</span></label>
+          <p class="hint">The helper is only asked when TikTok refuses the direct check; it then sees which username is checked.</p>
+          <p class="hint" id="loReady"></p>
+        </section>
+      </div>
+    </div>
 
     <div class="lvadd">
       <input id="lvUser" placeholder="TikTok username or tiktok.com/@user/live link" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="TikTok username">
@@ -278,14 +308,7 @@
         <label class="tg" style="display:block;margin-top:16px"><input type="checkbox" id="preferH264"><span>📱 Make videos iPhone-friendly (H.264)</span></label>
         <p class="hint" style="margin-top:4px">iPhone Photos only accepts H.264 / HEVC videos. Without this, YouTube can give VP9/AV1 files that Photos refuses. (YouTube is then limited to 1080p.)</p>
         <div class="sublab" style="margin-top:18px">🔴 TikTok LIVE</div>
-        <p class="hint" style="margin:0 0 8px">Paste a <b>tiktok.com/@user/live</b> link to record it now, or press <b>Watch</b> to record every time they go live. Recordings go to <i>tiktok/&lt;user&gt;/lives/</i>.</p>
-        <label class="tg" style="display:block"><input type="checkbox" id="liveHelper"><span>Use the tikrec.com helper when TikTok blocks the check</span></label>
-        <p class="hint" style="margin-top:4px">Only used when TikTok refuses the direct check. That service then sees which username is being checked.</p>
-        <div class="grid2" style="margin-top:10px;max-width:560px">
-          <div class="fld"><label>Recording quality</label><select id="liveQuality"><option value="best">Original - best quality (biggest files)</option><option value="hd">HD - smaller files</option><option value="sd">SD - smallest files</option></select></div>
-        </div>
-        <div class="fld" style="margin-top:10px;max-width:280px"><label>Stop a recording after</label><select id="liveMax"><option value="1">1 hour</option><option value="2">2 hours</option><option value="3">3 hours</option><option value="4">4 hours</option><option value="6">6 hours</option><option value="8">8 hours</option><option value="12">12 hours</option><option value="24">24 hours</option></select></div>
-        <p class="hint" id="liveReady"></p>
+        <p class="hint" style="margin:0">All live options (quality, max length, chat, alerts) are on the <b>Live</b> page → <b>⚙ Options</b>.</p>
       </section>
       <section class="sxpane" data-pane="speed">
         <h4>⚡ Speed &amp; names</h4>

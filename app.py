@@ -2366,7 +2366,6 @@ TT_HEADERS = {"Accept-Language": "en-US", "Referer": "https://www.tiktok.com/", 
               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
                             "Chrome/136.0.0.0 Safari/537.36"}
 LIVE_INTERVALS = (2, 5, 10)                             # live watches can check more often than post watches
-LIVE_MIN_FREE = 2 * 1024 ** 3                           # stop a recording before the disk is full
 live_now = {}                                           # lower-case username -> job id of the running recording
 live_lock = threading.Lock()
 _tt_local = threading.local()
@@ -2540,7 +2539,7 @@ def _stream_to_file(url, fh, job, cancel, started, deadline):
                 if now - job.get("stats_t", 0) > 45:              # viewers + title, at most once every 45 s
                     job["stats_t"] = now
                     threading.Thread(target=_live_stats, args=(job,), daemon=True).start()
-                if shutil.disk_usage(BASE_DIR).free < LIVE_MIN_FREE:
+                if shutil.disk_usage(BASE_DIR).free < live_min_free():
                     return n, "disk"
                 size = fh.tell()
                 el = int(now - started)
@@ -2558,6 +2557,144 @@ def _live_stats(job):
         update(job, viewers=n, peak=max(n, job.get("peak") or 0))
     if room.get("title"):
         update(job, live_title=str(room["title"])[:200])
+
+
+def live_max_minutes():
+    m = settings.get("live_max_minutes")
+    return int(m) if m else int(float(settings.get("live_max_hours", 6)) * 60)
+
+
+def live_min_free():
+    return float(settings.get("live_min_free_gb", 2)) * 1024 ** 3
+
+
+def _hms(t):
+    t = int(t)
+    return f"{t // 3600}:{t // 60 % 60:02d}:{t % 60:02d}"
+
+
+def _chat_load(path):
+    out = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    out.append(json.loads(line))
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return out
+
+
+def _chat_srt(comments, total):
+    """Each comment shows for 4 s (players stack overlapping lines, like a chat)."""
+    def ts(x):
+        x = max(0.0, x)
+        return f"{int(x // 3600):02d}:{int(x // 60 % 60):02d}:{int(x % 60):02d},{int(x * 1000 % 1000):03d}"
+    rows = []
+    for i, e in enumerate(comments, 1):
+        a = float(e.get("t") or 0)
+        b = min(a + 4, float(total) + 4)
+        text = re.sub(r"[\r\n]+", " ", f"{e.get('u') or '?'}: {e.get('x') or ''}")[:200]
+        rows.append(f"{i}\n{ts(a)} --> {ts(b)}\n{text}\n")
+    return "\n".join(rows)
+
+
+def _chat_text(chat, user):
+    lines = [f"Chat of @{user}'s TikTok LIVE", ""]
+    for e in chat:
+        k, who, x = e.get("k"), e.get("u") or "?", e.get("x") or ""
+        if k == "c":
+            lines.append(f"[{_hms(e.get('t') or 0)}] {who}: {x}")
+        elif k == "g":
+            lines.append(f"[{_hms(e.get('t') or 0)}] 🎁 {who} {x}")
+    return "\n".join(lines) + "\n"
+
+
+def _chat_thread(job, user, rid, started, stop, path):
+    """Read the live chat with TikTokLive (optional package) until the recording stops. Reconnects a few times."""
+    try:
+        import asyncio
+        from TikTokLive import TikTokLiveClient
+        from TikTokLive.events import CommentEvent, GiftEvent, LikeEvent, JoinEvent
+        from TikTokLive.client.web.web_settings import WebDefaults
+    except ImportError:
+        update(job, chat_state="Chat needs the TikTokLive package - rebuild the Docker image.")
+        return
+    key = (settings.get("live_chat_key") or "").strip()
+    if key:
+        WebDefaults.tiktok_sign_api_key = key
+    update(job, chat=[], chat_n=0, gifts_n=0, diamonds=0, likes=0, joins=0, chat_state="Connecting to chat…")
+    fh = open(path, "a", encoding="utf-8")
+    nick = lambda u: (getattr(u, "nickname", "") or getattr(u, "unique_id", "") or "?") if u else "?"
+
+    def emit(kind, who, text, **extra):
+        ev = {"t": round(time.time() - started, 1), "k": kind, "u": str(who)[:60], "x": str(text)[:300], **extra}
+        try:
+            fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
+            fh.flush()
+        except OSError:
+            pass
+        with lock:
+            buf = job.setdefault("chat", [])
+            buf.append(ev)
+            del buf[:-80]
+
+    async def session():
+        client = TikTokLiveClient(unique_id=user)
+
+        @client.on(CommentEvent)
+        async def _c(e):
+            emit("c", nick(e.user), e.comment)
+            with lock:
+                job["chat_n"] = job.get("chat_n", 0) + 1
+
+        @client.on(GiftEvent)
+        async def _g(e):
+            g = e.gift
+            if g is None or (g.type == 1 and e.streaking):     # streak gifts: count once, when the streak ends
+                return
+            n = e.repeat_count or 1
+            emit("g", nick(e.user), f"sent {n}× {g.name}", d=(g.diamond_count or 0) * n)
+            with lock:
+                job["gifts_n"] = job.get("gifts_n", 0) + n
+                job["diamonds"] = job.get("diamonds", 0) + (g.diamond_count or 0) * n
+
+        @client.on(LikeEvent)
+        async def _l(e):
+            if e.total:
+                update(job, likes=int(e.total))
+
+        @client.on(JoinEvent)
+        async def _j(e):
+            with lock:
+                job["joins"] = job.get("joins", 0) + 1
+
+        task = await client.start(room_id=int(rid), fetch_live_check=False)
+        update(job, chat_state="connected")
+        while not stop.is_set() and not task.done():
+            await asyncio.sleep(0.5)
+        if not task.done():
+            await client.disconnect()
+        elif task.exception() is not None:
+            raise task.exception()
+
+    tries = 0
+    try:
+        while not stop.is_set() and tries < 5:
+            try:
+                asyncio.run(session())
+                if stop.is_set():
+                    break
+            except Exception as exc:  # noqa: BLE001
+                app.logger.info("Chat for @%s: %s", user, exc)
+                update(job, chat_state="Chat unavailable: " + last_line(exc, "could not connect")[:160])
+            tries += 1
+            if stop.wait(min(60, 5 * tries)):
+                break
+    finally:
+        fh.close()
 
 
 def el_now(started):
@@ -2582,9 +2719,15 @@ def tiktok_live_worker(job, user, cancel):
     stem = f"{user} live {time.strftime('%Y-%m-%d %H-%M')}"
     raw = out_dir / f"{stem}.flv.part"
     started = time.time()
-    deadline = started + float(settings.get("live_max_hours", 6)) * 3600
+    deadline = started + live_max_minutes() * 60
     update(job, live=True, rec_started=started, label=f"🔴 @{user} LIVE", message="🔴 Recording…",
            live_user=user, room_id=st["room_id"], live_title=st["title"], viewers=None, peak=0, cover=st["cover"], marks=[])
+    chat_log = out_dir / f".{stem}.chat.jsonl"
+    chat_stop, chat_thread = threading.Event(), None
+    if settings.get("live_chat"):                         # chat is optional: it goes through a signing service
+        chat_thread = threading.Thread(target=_chat_thread, args=(job, user, st["room_id"], started, chat_stop, chat_log),
+                                       daemon=True, name=f"chat-{user}")
+        chat_thread.start()
     reason, fails, total, errmsg = "ended", 0, 0, ""
     with open(raw, "ab") as fh:
         while True:
@@ -2615,10 +2758,24 @@ def tiktok_live_worker(job, user, cancel):
             if cancel.wait(2):
                 reason = "stopped"
                 break
-    if total < 4096:
+    chat_stop.set()
+    if chat_thread is not None:
+        chat_thread.join(timeout=15)
+    el = el_now(started)
+    keep_min = int(settings.get("live_min_keep", 0) or 0)
+    if total < 4096 or (keep_min and el < keep_min * 60 and reason != "stopped"):
         raw.unlink(missing_ok=True)
+        chat_log.unlink(missing_ok=True)
+        if total >= 4096:
+            return finish_err(job, f"@{user}'s live lasted only {el // 60}m {el % 60:02d}s - not kept (shorter than {keep_min} min, see ⚙ Options).")
         return finish_err(job, errmsg or "Could not record anything - TikTok gave no working stream for this live.")
     update(job, message="Saving the recording…", speed="")
+    chat = _chat_load(chat_log)
+    comments = [e for e in chat if e.get("k") == "c"]
+    srt = None
+    if comments and settings.get("live_chat_subs", True):   # chat as a subtitle track you can switch on in any player
+        srt = out_dir / f".{stem}.chat.srt"
+        srt.write_text(_chat_srt(comments, el), encoding="utf-8")
     marks = sorted(m["t"] for m in job.get("marks") or [] if 0 < m["t"] < el_now(started))
     meta_in, meta_map, metafile = [], [], None
     if marks:                                            # your ⭐ moments become chapters you can jump to in any player
@@ -2636,21 +2793,40 @@ def tiktok_live_worker(job, user, cancel):
     k = 2
     while mp4.exists():
         mp4, k = out_dir / f"{stem} ({k}).mp4", k + 1
-    try:
-        hevc = _vcodec(raw) in ("hevc", "h265")
-        _ffmpeg(["ffmpeg", "-y", "-v", "error", "-f", "flv", "-i", str(raw), *meta_in, "-map", "0", *meta_map, "-c", "copy",
-                 *(["-tag:v", "hvc1"] if hevc else []), "-movflags", "+faststart", str(mp4)], timeout=3 * 3600)
-        raw.unlink(missing_ok=True)
-        saved = mp4
-    except Exception:  # noqa: BLE001   could not convert: keep the raw recording rather than lose it
-        app.logger.exception("Live remux failed for @%s", user)
+    hevc = _vcodec(raw) in ("hevc", "h265")
+    base = ["ffmpeg", "-y", "-v", "error", "-f", "flv", "-i", str(raw), *meta_in]
+    tail = [*(["-tag:v", "hvc1"] if hevc else []), "-movflags", "+faststart", str(mp4)]
+    sub_idx = 1 + (1 if meta_in else 0)
+    tries = []
+    if srt is not None:
+        tries.append(base + ["-i", str(srt), "-map", "0", "-map", f"{sub_idx}:0", *meta_map, "-c", "copy", "-c:s", "mov_text",
+                             "-metadata:s:s:0", "title=Live chat", "-metadata:s:s:0", "handler_name=Live chat",
+                             "-metadata:s:s:0", "language=und"] + tail)
+    tries.append(base + ["-map", "0", *meta_map, "-c", "copy"] + tail)
+    saved = None
+    for cmd in tries:
+        try:
+            _ffmpeg(cmd, timeout=3 * 3600)
+            saved = mp4
+            break
+        except Exception:  # noqa: BLE001   try again without the chat track
+            app.logger.exception("Live remux failed for @%s", user)
+            mp4.unlink(missing_ok=True)
+    if saved is None:                                    # could not convert: keep the raw recording rather than lose it
         saved = raw.with_name(f"{stem}.flv")
         raw.replace(saved)
-    if metafile is not None:
-        metafile.unlink(missing_ok=True)
+    else:
+        raw.unlink(missing_ok=True)
+    for tmp in (metafile, srt):
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
+    if chat:                                             # a readable transcript next to the video
+        saved.with_name(saved.stem + ".chat.txt").write_text(_chat_text(chat, user), encoding="utf-8")
+    chat_log.unlink(missing_ok=True)
     fs_dirty()
     el = int(time.time() - started)
     moments = f" · {len(marks)} ⭐ moment{'s' if len(marks) != 1 else ''}" if marks else ""
+    moments += f" · 💬 {len(comments)} chat message{'s' if len(comments) != 1 else ''}" if chat else ""
     why = {"stopped": "you stopped it", "time": "time limit reached", "disk": "the disk is almost full"}.get(reason, "the live ended")
     rel = saved.relative_to(folder).as_posix()
     took = f"{el // 3600}h {el // 60 % 60:02d}m" if el >= 3600 else f"{el // 60}m {el % 60:02d}s"
@@ -2685,10 +2861,20 @@ def start_live(user, silent=False):
             with live_lock:
                 if live_now.get(key) == job["id"]:
                     live_now.pop(key, None)
-        if silent and job["status"] == "done":                 # started by the watchlist: say it was saved
+        if silent and job["status"] == "done" and settings.get("live_notify", True):   # started by the watchlist: say it was saved
             notify(f"⏺ Saved @{user}'s live", str(job.get("message") or "")[:200], ["movie_camera"])
     threading.Thread(target=run, daemon=True, name=f"live-{key}").start()
     return job, None
+
+
+def _has_tiktoklive():
+    if "TikTokLive" in sys.modules:
+        return True
+    try:
+        import importlib.util
+        return importlib.util.find_spec("TikTokLive") is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def live_user_from(target):
@@ -2701,7 +2887,10 @@ def _live_rec_view(j):
             "secs": j.get("rec_secs", 0), "size": j.get("rec_size", 0), "size_h": human(j.get("rec_size", 0)),
             "speed": j.get("speed", ""), "viewers": j.get("viewers"), "peak": j.get("peak") or 0,
             "status": j["status"], "message": j.get("message", ""), "cover": j.get("cover") or "",
-            "quality": j.get("quality") or "", "marks": len(j.get("marks") or [])}
+            "quality": j.get("quality") or "", "marks": len(j.get("marks") or []),
+            "chat": list(j.get("chat") or [])[-40:], "chat_n": j.get("chat_n", 0), "gifts_n": j.get("gifts_n", 0),
+            "diamonds": j.get("diamonds", 0), "likes": j.get("likes", 0), "joins": j.get("joins", 0),
+            "chat_state": j.get("chat_state", "")}
 
 
 def live_habit(starts):
@@ -2739,6 +2928,7 @@ def live_overview():
                  "lives_seen": len(w.get("live_starts") or [])} for w in sorted(ws, key=lambda w: w["created"])]
     return jsonify(success=True, accounts=accounts, recording=recs, intervals=LIVE_INTERVALS + INTERVALS[:2],
                    quality=settings.get("live_quality", "best"),
+                   chat_on=bool(settings.get("live_chat")),
                    helper=settings.get("live_helper", True), max_hours=settings.get("live_max_hours", 6),
                    ready=_cffi is not None, now=time.time())
 
@@ -2774,8 +2964,9 @@ def fs_lives():
             rel = fs_rel(f)
             with mlock:
                 dur = (media_meta.get(rel) or {}).get("d") or 0
+            tr = f.with_name(f.stem + ".chat.txt")
             out.append({"path": rel, "user": f.parent.parent.name, "name": f.name, "size": st.st_size, "size_h": human(st.st_size),
-                        "modified": st.st_mtime, "duration": dur})
+                        "modified": st.st_mtime, "duration": dur, "transcript": fs_rel(tr) if tr.is_file() else ""})
     out.sort(key=lambda x: -x["modified"])
     total = sum(x["size"] for x in out)
     return jsonify(success=True, items=out[:300], count=len(out), total_h=human(total),
@@ -3150,7 +3341,7 @@ def run_live_watch(w):
             w["last_new"] = 1 if started else 0
             w["total_new"] = w.get("total_new", 0) + (1 if started else 0)
             _save(WATCH_FILE, watches)
-    if started:
+    if started and settings.get("live_notify", True):
         notify(f"🔴 @{user} is live", "Media Hub started recording it.", ["red_circle"])
 
 
@@ -3403,6 +3594,26 @@ def settings_api():
             settings["clean_urls"] = bool(d["clean_urls"])
         if "live_helper" in d:
             settings["live_helper"] = bool(d["live_helper"])
+        for k in ("live_chat", "live_chat_subs", "live_notify"):
+            if k in d:
+                settings[k] = bool(d[k])
+        if "live_chat_key" in d:
+            settings["live_chat_key"] = str(d["live_chat_key"] or "").strip()[:200]
+        if "live_max_minutes" in d:
+            try:
+                settings["live_max_minutes"] = max(5, min(1440, int(d["live_max_minutes"])))
+            except (TypeError, ValueError):
+                return jsonify(success=False, message="Max length must be 5-1440 minutes."), 400
+        if "live_min_free_gb" in d:
+            try:
+                settings["live_min_free_gb"] = max(1, min(100, int(d["live_min_free_gb"])))
+            except (TypeError, ValueError):
+                return jsonify(success=False, message="Free space must be 1-100 GB."), 400
+        if "live_min_keep" in d:
+            try:
+                settings["live_min_keep"] = max(0, min(60, int(d["live_min_keep"])))
+            except (TypeError, ValueError):
+                return jsonify(success=False, message="Minimum length must be 0-60 minutes."), 400
         if d.get("live_quality") in LIVE_QUALITY_ORDER:
             settings["live_quality"] = d["live_quality"]
         if "live_max_hours" in d:
@@ -3434,6 +3645,10 @@ def settings_api():
                    retry_count=settings.get("retry_count", 3), clean_urls=settings.get("clean_urls", True),
                    live_helper=settings.get("live_helper", True), live_max_hours=settings.get("live_max_hours", 6),
                    live_ready=_cffi is not None, live_quality=settings.get("live_quality", "best"),
+                   live_chat=settings.get("live_chat", False), live_chat_subs=settings.get("live_chat_subs", True),
+                   live_chat_key_set=bool(settings.get("live_chat_key")), live_notify=settings.get("live_notify", True),
+                   live_max_minutes=live_max_minutes(), live_min_free_gb=settings.get("live_min_free_gb", 2),
+                   live_min_keep=settings.get("live_min_keep", 0), live_chat_ready=_has_tiktoklive(),
                    digest=settings.get("digest", "off"), digest_hour=settings.get("digest_hour", 20),
                    digest_waiting=sum(e.get("count", 0) for e in _load(DIGEST_FILE, {}).get("pending", {}).values()),
                    ig_cap=ig_cap())

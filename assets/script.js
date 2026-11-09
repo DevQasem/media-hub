@@ -1938,6 +1938,7 @@ function lvRender(d) {
         <div><em>Speed</em><b>${esc(r.speed || '–')}</b></div>
         <div><em>Viewers</em><b>${r.viewers == null ? '–' : new Intl.NumberFormat('en', {notation:'compact'}).format(r.viewers)}</b><small>${r.peak ? 'peak ' + new Intl.NumberFormat('en', {notation:'compact'}).format(r.peak) : ''}</small></div>
       </div>
+      ${lvChatHtml(r, d.chat_on)}
       <div class="lvbtns"><button class="btn ghost lvmark" data-lvmark="${esc(r.id)}" title="Mark this moment - it becomes a chapter in the video">⭐ Mark moment${r.marks ? ` <em>${r.marks}</em>` : ''}</button><a class="btn ghost" href="${lvLink(r.user)}" target="_blank" rel="noopener noreferrer">↗ TikTok</a><button class="btn ghost lvdanger" data-lvstop="${esc(r.id)}">⏹ Stop &amp; save</button></div></div>`).join('')
     : '<div class="lvempty">Nothing is recording. When a watched account goes live, it shows up here by itself.</div>');
   const ivs = d.intervals || [2, 5, 10, 15, 30];
@@ -1956,6 +1957,7 @@ function lvRender(d) {
         <button class="mini del" data-lvdel="${esc(a.id)}" aria-label="Stop watching @${esc(a.user)}">✕</button>
       </div></div>`;
   }).join('') : '<div class="lvempty">No accounts yet. Type a username above and press <b>Watch</b>.</div>');
+  document.querySelectorAll('.lvfeed').forEach(f => { if (!f.matches(':hover')) f.scrollTop = f.scrollHeight; });
   if (!d.ready) setHintLv('⚠ curl_cffi is missing on the server, so TikTok blocks checks more often. Rebuild the Docker image.');
 }
 function setHintLv(t, err) { $('lvHint').textContent = t || ''; $('lvHint').classList.toggle('err', !!err); }
@@ -1981,7 +1983,7 @@ function lvSavedRender() {
   $('lvSaved').innerHTML = r.items.length ? chips + `<div class="lvlist">` + items.map(x => `<div class="lvrow">
       <span class="lvthumb"><img loading="lazy" alt="" src="${xThumb(x)}" onerror="this.remove()"><span>▶</span></span><div class="lvwho"><b>@${esc(x.user)}</b><small>${esc(new Date(x.modified * 1000).toLocaleString(undefined, {dateStyle:'medium', timeStyle:'short'}))}</small></div>
       <span class="lvdur">${x.duration ? fmtDur(x.duration) : '–'}</span><span class="lvsize">${esc(x.size_h)}</span>
-      <div class="lvctl"><a class="mini" href="${xFileUrl(x)}" target="_blank" rel="noopener">▶ Play</a><a class="mini" href="${xFileUrl(x)}?dl=1" download>⬇</a><button class="mini" data-lvfolder="${esc(x.path.split('/').slice(0, -1).join('/'))}" aria-label="Show in Files">📂</button></div></div>`).join('') + '</div>'
+      <div class="lvctl"><a class="mini" href="${xFileUrl(x)}" target="_blank" rel="noopener">▶ Play</a>${x.transcript ? `<a class="mini" href="${xFileUrl({path:x.transcript})}" target="_blank" rel="noopener" title="Chat transcript">💬</a>` : ''}<a class="mini" href="${xFileUrl(x)}?dl=1" download>⬇</a><button class="mini" data-lvfolder="${esc(x.path.split('/').slice(0, -1).join('/'))}" aria-label="Show in Files">📂</button></div></div>`).join('') + '</div>'
     : '<div class="lvempty">No saved lives yet.</div>';
 }
 async function lvAddWatch() {
@@ -2020,4 +2022,47 @@ async function lvRecord(u) {
     else if (t.dataset.lvfolder) { await openFiles(); xGo(t.dataset.lvfolder); }
     else if (t.dataset.lvf !== undefined) { LV.filter = t.dataset.lvf; lvSavedRender(); }
   });
+})();
+
+
+/* ================= Live: chat feed + options ================= */
+const lvNum = n => new Intl.NumberFormat('en', {notation:'compact'}).format(n || 0);
+function lvChatHtml(r, on) {
+  if (!on) return '';
+  const st = r.chat_state && r.chat_state !== 'connected' ? `<div class="lvchatstate">${esc(r.chat_state)}</div>` : '';
+  const rows = (r.chat || []).map(e => e.k === 'g'
+    ? `<div class="cg"><b>🎁 ${esc(e.u)}</b> ${esc(e.x)}${e.d ? ` <em>💎 ${lvNum(e.d)}</em>` : ''}</div>`
+    : `<div class="cc"><b style="--h:${[...String(e.u)].reduce((a, c) => a + c.charCodeAt(0), 0) % 360}">${esc(e.u)}</b> ${esc(e.x)}</div>`).join('');
+  return `<div class="lvchat">
+    <div class="lvchatstats"><span>💬 ${lvNum(r.chat_n)}</span><span>🎁 ${lvNum(r.gifts_n)}${r.diamonds ? ` · 💎 ${lvNum(r.diamonds)}` : ''}</span><span>❤ ${lvNum(r.likes)}</span><span>👋 ${lvNum(r.joins)}</span></div>
+    ${st}<div class="lvfeed" data-feed="${esc(r.id)}">${rows || '<div class="lvchatwait">Waiting for the first message…</div>'}</div></div>`;
+}
+async function lvOptsLoad() {
+  const d = await api('/settings'); if (!d.success) return;
+  const set = (id, v) => { if ($(id)) { if ($(id).type === 'checkbox') $(id).checked = !!v; else $(id).value = String(v); } };
+  set('loQuality', d.live_quality || 'best'); set('loMax', d.live_max_minutes || 360); set('loKeep', d.live_min_keep || 0); set('loFree', d.live_min_free_gb || 2);
+  set('loChat', d.live_chat); set('loChatSubs', d.live_chat_subs !== false); set('loNotify', d.live_notify !== false); set('loHelper', d.live_helper !== false);
+  if ($('loMax') && !$('loMax').value) { $('loMax').insertAdjacentHTML('beforeend', `<option value="${d.live_max_minutes}">${d.live_max_minutes} minutes</option>`); $('loMax').value = String(d.live_max_minutes); }
+  $('loChatKey').value = ''; $('loChatKey').placeholder = d.live_chat_key_set ? '•••••••• saved - type to replace' : 'not set';
+  $('loChatReady').textContent = d.live_chat_ready === false ? '⚠ The TikTokLive package is not installed on the server - rebuild the Docker image to use chat.' : '';
+  $('loReady').textContent = d.live_ready === false ? '⚠ curl_cffi is not installed on the server - TikTok blocks checks more often. Rebuild the Docker image.' : '';
+}
+async function lvOpt(key, val, msg) {
+  const r = await post('/settings', {[key]: val});
+  toast(r.success ? msg + ' ✓' : (r.message || 'Could not save')); if (r.success) lvLoad();
+}
+(function initLiveOpts() {
+  const b = $('lvOptBtn'); if (!b) return;
+  b.addEventListener('click', () => { const o = $('lvOpts'), open = o.hidden; o.hidden = !open; b.setAttribute('aria-expanded', String(open)); b.classList.toggle('on', open); if (open) lvOptsLoad(); });
+  const sel = (id, key, msg) => safeBind(id, 'change', () => lvOpt(key, $(id).value, msg($(id))));
+  sel('loQuality', 'live_quality', el => 'New recordings: ' + el.selectedOptions[0].text.split(' - ')[0]);
+  sel('loMax', 'live_max_minutes', el => 'Recordings stop after ' + el.selectedOptions[0].text);
+  sel('loKeep', 'live_min_keep', el => +el.value ? 'Lives shorter than ' + el.selectedOptions[0].text + ' are not kept' : 'Every live is kept');
+  sel('loFree', 'live_min_free_gb', el => 'Stops when less than ' + el.value + ' GB is free');
+  const tog = (id, key, on, off) => safeBind(id, 'change', () => lvOpt(key, $(id).checked, $(id).checked ? on : off));
+  tog('loChat', 'live_chat', 'Chat is recorded from the next recording', 'Chat off');
+  tog('loChatSubs', 'live_chat_subs', 'Chat is added as subtitles', 'No chat subtitles');
+  tog('loNotify', 'live_notify', 'Live alerts on', 'Live alerts off');
+  tog('loHelper', 'live_helper', 'Helper on', 'Helper off - only TikTok itself is asked');
+  safeBind('loChatKeySave', 'click', async () => { await lvOpt('live_chat_key', $('loChatKey').value.trim(), $('loChatKey').value.trim() ? 'API key saved' : 'API key removed'); lvOptsLoad(); });
 })();

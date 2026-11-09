@@ -26,3 +26,11 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+---
+
+Live chat (optional) uses the TikTokLive Python package by Isaac Kogan, installed from PyPI
+(https://github.com/isaackogan/TikTokLive). It is NOT bundled in this repository and has its own
+license (a modified AGPL-3.0) - read it before redistributing a Docker image that includes it.
+TikTokLive connects through the Euler Stream signing service (https://www.eulerstream.com).
