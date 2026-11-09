@@ -68,20 +68,23 @@ const detect = url => { const k = Object.keys(BRANDS).find(k => BRANDS[k].re.tes
 const setColor = c => document.documentElement.style.setProperty('--pc', c);
 
 /* ---------- appearance (theme, accent, text size, compact, confetti) ---------- */
-const UI_KEY = 'hub_ui', UI_DEF = {theme:'dark', accent:'auto', size:'m', density:'comfy', confetti:'1'};
+const UI_KEY = 'hub_ui', UI_DEF = {theme:'dark', accent:'auto', size:'m', density:'comfy', confetti:'1', palette:'classic'};
 const ACCENTS = {violet:'#8b5cf6', cyan:'#22d3ee', pink:'#f472b6', green:'#34d399', orange:'#fb923c', red:'#fb7185'};
 let ui = Object.assign({}, UI_DEF);
 try { Object.assign(ui, JSON.parse(localStorage.getItem(UI_KEY) || '{}')); } catch {}
 const accentOr = c => ui.accent !== 'auto' && ACCENTS[ui.accent] ? ACCENTS[ui.accent] : c;
 
 function applyUi() {
-  const d = document.documentElement; d.dataset.theme = ui.theme; d.dataset.size = ui.size; d.dataset.density = ui.density;
+  const d = document.documentElement; d.dataset.theme = ui.theme; d.dataset.size = ui.size; d.dataset.density = ui.density; d.dataset.palette = ui.palette || 'classic';
   const light = ui.theme === 'light' || (ui.theme === 'auto' && window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches);
-  if($('themeMeta')) $('themeMeta').content = light ? '#f1f4ff' : '#07080f';
+  d.dataset.scheme = light ? 'light' : 'dark';
+  if($('themeMeta')) $('themeMeta').content = (getComputedStyle(d).getPropertyValue('--bg') || '').trim() || (light ? '#f1f4ff' : '#07080f');
+  document.querySelectorAll('[data-look]').forEach(b => b.classList.toggle('on', (ui.palette || 'classic') === b.dataset.look));
   document.querySelectorAll('[data-ui]').forEach(b => { const [k, v] = b.dataset.ui.split(':'); b.classList.toggle('on', ui[k] === v); });
   if($('confettiOn')) $('confettiOn').checked = ui.confetti === '1';
   setColor(accentOr((BRANDS[document.body.dataset.site] || BRANDS.other).color));
 }
+try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => { if (ui.theme === 'auto') applyUi(); }); } catch {}
 function setUi(k, v) { ui[k] = v; try { localStorage.setItem(UI_KEY, JSON.stringify(ui)); } catch {} applyUi(); }
 function setBrand(key) {
   const b = BRANDS[key] || BRANDS.other; document.body.dataset.site = key; setColor(accentOr(b.color));
@@ -149,7 +152,7 @@ function onUrlInput() {
   $('clearBtn').style.display = v ? '' : 'none'; $('pasteBtn').style.display = v ? 'none' : '';
   ['preview', 'snapbox', 'igbox'].forEach(id => $(id).classList.remove('show'));
   ['actions', 'watchrow'].forEach(id => $(id).classList.remove('show'));
-  AppState.chanUrl = ''; setHint(''); AppState.mode = null; AppState.noPreview = false; $('platforms').style.display = v ? 'none' : '';
+  AppState.chanUrl = ''; setHint(''); AppState.mode = null; AppState.noPreview = false; AppState.liveUser = null; liveWint(false); $('platforms').style.display = v ? 'none' : '';
   if (v && document.body.dataset.tab === 'watch') setTab('home');
   if (v) hideClip(); else { closeCustom(); setBrand('other'); setOpts({}); }
   const c = classify(v);
@@ -182,7 +185,9 @@ function sxPane(n) {
 }
 function openSettings(sec) { $('smodal').classList.add('open'); sxPane(typeof sec === 'string' ? sec : SX.pane); }
 function setTab(t) {
-  document.body.dataset.tab = t; $('tabbar').style.setProperty('--ti', t === 'watch' ? 1 : 0);
+  document.body.dataset.tab = t; $('tabbar').style.setProperty('--ti', ({home:0, live:1, watch:2})[t] || 0);
+  if (t === 'live') { lvOpen(); setColor('#25f4ee'); } else { lvClose(); if (document.body.dataset.wasLive) applyUi(); }
+  document.body.dataset.wasLive = t === 'live' ? '1' : '';
   document.querySelectorAll('.tabbar [data-tab]').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
   document.querySelectorAll('#rail [data-nav]').forEach(b => b.classList.toggle('on', b.dataset.nav === t));
   if (window.scrollTo) window.scrollTo({top:0, behavior:'smooth'});
@@ -209,12 +214,44 @@ function igCard(r, d) {
   $('igbox').classList.add('show'); $('actions').classList.add('show'); refreshOpts();
 }
 
+/* ---------- playlist / channel picker (the Arroxy-style "choose videos" list) ---------- */
+const isListUrl = u => /[?&]list=|youtube\.com\/(?:playlist|@[\w.-]+|channel\/|c\/|user\/)|tiktok\.com\/@[\w.-]+\/?(?:[?#]|$)|\/(?:playlists?|channel|channels|user|users|series|collections?)\//i.test(u);
+const pl = {url:'', items:[], sel:new Set(), q:''};
+function closePl() { $('plmodal').classList.remove('open'); }
+async function openPl() {
+  pl.url = AppState.videoUrl; if (!pl.url) return;
+  $('plmodal').classList.add('open'); $('pltitle').textContent = '☑ Choose videos'; $('plFilter').value = ''; pl.q = '';
+  $('plist').innerHTML = '<div class="empty">Reading the list… (can take up to a minute for big channels)</div>'; $('plGoBtn').disabled = true;
+  const r = await post('/playlist-info', {url: pl.url});
+  if (!r.success) { $('plist').innerHTML = `<div class="empty"><b>😕</b>${esc(r.error || r.message || 'Could not read the list.')}</div>`; return; }
+  pl.items = r.entries; pl.sel = new Set(); $('pltitle').textContent = '☑ ' + (r.title || 'Choose videos'); renderPl();
+}
+function plShown() { const q = pl.q.toLowerCase(); return q ? pl.items.filter(e => e.title.toLowerCase().includes(q)) : pl.items; }
+function renderPl() {
+  const shown = plShown();
+  $('plist').innerHTML = shown.length ? shown.map(e => `<button class="prow${pl.sel.has(e.index) ? ' on' : ''}" data-i="${e.index}" aria-pressed="${pl.sel.has(e.index)}">`
+    + `<span class="pcheck" aria-hidden="true"></span>` + (e.thumb ? `<img loading="lazy" alt="" referrerpolicy="no-referrer" src="${esc(e.thumb)}">` : '<span class="pth">🎬</span>')
+    + `<span class="pmain"><b>${esc(e.title)}</b><small>#${e.index}${e.duration ? ' · ' + fmtDur(e.duration) : ''}</small></span></button>`).join('')
+    : '<div class="empty">No video matches that filter.</div>';
+  const n = pl.sel.size; $('plGoBtn').disabled = !n; $('plGoBtn').textContent = n ? `⬇ Download ${n} ${n === 1 ? 'video' : 'videos'}` : 'Pick at least one video';
+}
+async function plGo() {
+  if (!pl.sel.size) return;
+  const options = Object.assign(getOpts(), {name:'', playlist:'single', items:''}), items = pl.items.filter(e => pl.sel.has(e.index)).map(e => ({action_type:'url', target:e.url, options}));
+  closePl(); const r = await post('/batch', {items});
+  if (!r.success) return toast('Could not start the downloads');
+  setTracked([...tracked(), ...r.job_ids]); setGroups([...groups(), r.job_ids]);
+  toast(`${r.job_ids.length} queued` + (r.errors && r.errors.length ? ` · ${r.errors.length} skipped` : '')); watch();
+}
+
+const LIVE_RE = /^https?:\/\/(?:www\.|m\.)?tiktok\.com\/@([A-Za-z0-9._-]{2,24})\/live\b/i;
 function videoPreview(url) {
   AppState.mode = 'video'; AppState.videoUrl = url;
+  const lm = url.match(LIVE_RE); AppState.liveUser = lm ? lm[1] : null; AppState.liveOn = null; liveWint(!!lm);
   const d = detect(url); setBrand(d.key); $('actions').classList.add('show');
   AppState.timer = setTimeout(async () => {
     const mine = ++AppState.seq;
-    setHint(`Reading ${d.name} link…`); $('preview').classList.add('show');
+    setHint(`Reading ${d.name} link…`); $('preview').classList.add('show'); $('plnote').style.display = 'none';
     $('thumb').className = 'thumb loading'; setThumb('');
     $('ptitle').textContent = 'Loading details…'; $('chips').innerHTML = ''; $('dur').style.display = 'none';
     $('siteBadge').textContent = d.name; $('siteBadge').style.background = d.color;
@@ -223,6 +260,7 @@ function videoPreview(url) {
     if (mine !== AppState.seq) return;
     if (!r.success) { $('preview').classList.remove('show'); AppState.noPreview = true; refreshOpts(); return setHint((r.error || 'No preview for this link.') + ' You can still try the download.', true); }
     if (r.gallery) return igCard(r, d);
+    if (r.live) return liveCard(r);
 
     setHint(''); $('siteBadge').textContent = r.site || d.name;
     AppState.chanUrl = r.channel_url || ''; AppState.chanName = r.uploader || '';
@@ -249,6 +287,8 @@ function videoPreview(url) {
     if (r.duration) { $('dur').textContent = fmtDur(r.duration); $('dur').style.display = ''; }
 
     const chips = [];
+    if (r.quality && r.quality.height) { const q = r.quality; chips.push([`🎞 ${q.height >= 2160 ? '4K' : q.height + 'p'}${q.fps >= 50 ? ' · ' + q.fps + ' fps' : ''}${q.hdr ? ' · HDR' : ''}`, 'ok']); }
+    $('plnote').style.display = isListUrl(url) ? '' : 'none';
     if (r.uploader) chips.push('👤 ' + r.uploader);
     if (r.duration) chips.push(`⏱ ${r.duration}s`);
     if (r.views != null) chips.push('👁 ' + new Intl.NumberFormat('en', {notation:'compact'}).format(r.views));
@@ -317,7 +357,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) setT
 window.addEventListener('focus', () => setTimeout(checkClipboard, 300));
 
 /* ---------- options (Customize) ---------- */
-const OPT_DEFAULTS = {kind:'video', quality:'best', container:'mp4', compat:false, audio_fmt:'mp3', abr:'192', subs:false, autosubs:false, sub_langs:'en',
+const OPT_DEFAULTS = {kind:'video', quality:'best', container:'mp4', compat:false, audio_fmt:'mp3', abr:'192', subs:false, autosubs:false, sub_langs:'en', sub_fmt:'srt',
   embed_subs:false, thumb:false, embed_thumb:false, meta:false, sponsor:false, desc:false, playlist:'single', items:'', clip_start:'', clip_end:'',
   date_after:'', date_before:'', min_dur:'', max_dur:'', min_views:'', max_mb:'', title_has:'', title_not:'',
   force:false, name:'', ig_what:'posts', fx_look:'none', fx_blur:'none', fx_sharpen:false, fx_mirror:'none', fx_rotate:'0', fx_speed:'1', fx_crop:'none', fx_scale:'none', fx_mute:false, fx_keep:true};
@@ -361,6 +401,11 @@ function updateGo(o, lk) {
   if (AppState.mode === 'snap') {
     label = 'Download all stories'; sub = 'Public stories · saved in snapchat/';
   }
+  else if (AppState.liveUser) {
+    label = AppState.liveOn === false ? 'Not live right now' : 'Record live';
+    sub = AppState.liveOn === false ? 'Press Watch below to record when they go live' : AppState.liveOn ? `Until the live ends or you stop it · tiktok/${AppState.liveUser}/lives/` : 'Checking if they are live…';
+    icon = '🔴';
+  }
   else if (AppState.mode === 'ig') {
     label = 'Download from Instagram'; sub = 'Original quality · saved in instagram/';
   }
@@ -370,11 +415,12 @@ function updateGo(o, lk) {
     icon = '🖼️';
   }
   else {
-    label = o.kind === 'audio' ? 'Download ' + o.audio_fmt.toUpperCase() : o.kind === 'image' ? 'Save the photo' : o.kind === 'gif' ? 'Make a GIF' : o.kind === 'sticker' ? 'Make a sticker' : 'Download';
-    sub = o.kind === 'audio' ? `Audio only${['flac','wav'].includes(o.audio_fmt) ? '' : ' · ' + o.abr + ' kbps'}` : o.kind === 'image' ? 'Cover / photo as JPG'
+    label = o.kind === 'subs' ? 'Download subtitles' : o.kind === 'audio' ? 'Download ' + o.audio_fmt.toUpperCase() : o.kind === 'image' ? 'Save the photo' : o.kind === 'gif' ? 'Make a GIF' : o.kind === 'sticker' ? 'Make a sticker' : 'Download';
+    sub = o.kind === 'subs' ? `Subtitles only · ${o.sub_fmt.toUpperCase()} · ${o.sub_langs || 'en'}` : o.kind === 'audio' ? `Audio only${['flac','wav'].includes(o.audio_fmt) ? '' : ' · ' + o.abr + ' kbps'}` : o.kind === 'image' ? 'Cover / photo as JPG'
         : o.kind === 'gif' ? 'Looping GIF, 480 px' : o.kind === 'sticker' ? 'WhatsApp-size WebP' : `${o.quality === 'best' ? 'Best quality' : o.quality + 'p'} · ${o.container.toUpperCase()}`;
 
     if (o.kind === 'audio') icon = '🎵';
+    if (o.kind === 'subs') icon = '💬';
     if (o.kind === 'image') icon = '🖼️';
   }
 
@@ -451,7 +497,8 @@ function startVideo(audio) {
   const options = getOpts();
   if (AppState.mode === 'ig') options.kind = 'video';
   else if (audio) options.kind = 'audio';
-  run({action_type:'url', target:AppState.videoUrl, options}, AppState.mode === 'ig' ? 'Fetching from Instagram…' : options.kind === 'audio' ? 'Extracting audio…' : 'Downloading…');
+  if (AppState.liveUser && AppState.liveOn === false) return toast(`@${AppState.liveUser} is not live - press Watch to record automatically`);
+  run({action_type:'url', target:AppState.videoUrl, options}, AppState.liveUser ? `🔴 Recording @${AppState.liveUser}'s live…` : AppState.mode === 'ig' ? 'Fetching from Instagram…' : options.kind === 'audio' ? 'Extracting audio…' : 'Downloading…');
 }
 
 function startSnap() {
@@ -469,11 +516,12 @@ async function run(payload, title) {
 function openProgress(title) {
   AppState.resultOpen = false; $('modal').classList.add('open'); $('m-load').style.display = ''; $('m-res').style.display = 'none';
   $('ltitle').textContent = title; $('bar').style.width = '0'; setRing(0); $('lmsg').textContent = 'Starting…'; $('lmeta').textContent = ''; $('cancelBtn').disabled = false;
+  $('cancelBtn').textContent = /Recording .*live/.test(title) ? '⏹ Stop & save' : 'Cancel';
 }
 function setRing(p) { p = Math.max(0, Math.min(100, +p || 0)); $('mring').style.setProperty('--p', p); $('mpct').textContent = Math.round(p) + '%'; $('mring').classList.toggle('ind', p < 1); }
 function updateProgress(j) { setRing(j.progress); $('bar').style.width = j.progress + '%'; $('lmsg').textContent = j.message; $('lmeta').textContent = [j.speed, j.eta && 'ETA ' + j.eta].filter(Boolean).join('  ·  '); }
 function hideProgress() { $('modal').classList.remove('open'); AppState.viewing = null; toast('Running in the background - a popup will tell you when it is done'); }
-async function cancelJob() { if (!AppState.viewing) return; $('cancelBtn').disabled = true; $('lmsg').textContent = 'Cancelling…'; await api('/cancel/' + AppState.viewing, {method:'POST'}); }
+async function cancelJob() { if (!AppState.viewing) return; $('cancelBtn').disabled = true; $('lmsg').textContent = $('cancelBtn').textContent.includes('Stop') ? 'Stopping and saving…' : 'Cancelling…'; await api('/cancel/' + AppState.viewing, {method:'POST'}); }
 
 /* One polling loop only: watch() is guarded, watchBody() does one poll. */
 async function watch() {
@@ -507,7 +555,10 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) watc
 function renderStrip(running) {
   AppState.lastRunning = running;
   $('tbRun').textContent = running.length || ''; $('pillRun').textContent = running.length ? `⏳ ${running.length} running` : '⏳ idle'; $('pillRun').classList.toggle('on', running.length > 0);
-  const more = running.length > 4 ? `<div class="run"><span>+ ${running.length - 4} more running…</span></div>` : '';
+  const act = running.filter(j => j.status === 'running').length, wait = running.filter(j => j.status === 'queued').length, held = running.filter(j => j.status === 'paused').length;
+  if (running.length) $('pillRun').textContent = `⏳ ${act} running` + (wait ? ` · ${wait} waiting` : '') + (held ? ` · ${held} paused` : '');
+  const more = (running.length > 4 ? `<div class="run" data-openq="1"><span>+ ${running.length - 4} more in the queue…</span></div>` : '')
+    + (running.length ? `<button class="qlink" data-openq="1">☰ Manage queue <em>reorder · pause · cancel</em></button>` : '');
   $('strip').innerHTML = running.slice(0, 4).map(j => `<div class="run" data-run-id="${esc(j.id)}"><div class="pring${j.progress < 1 ? ' ind' : ''}" style="--p:${Math.round(j.progress)}"><b>${Math.round(j.progress)}</b></div><span>${esc(j.label)} · ${esc(j.message)}</span></div>`).join('') + more;
   document.querySelectorAll('.run[data-run-id]').forEach(el => el.addEventListener('click', (e) => peek(e.currentTarget.dataset.runId)));
 }
@@ -516,7 +567,7 @@ function redo() {
   if (!AppState.lastRun) return; closeResult();
   const p = JSON.parse(JSON.stringify(AppState.lastRun.payload)); p.options = Object.assign({}, p.options, {force:true}); run(p, AppState.lastRun.title);
 }
-function peek(id) { const j = AppState.lastRunning.find(x => x.id === id); if (!j) return; AppState.viewing = id; openProgress(j.label); updateProgress(j); }
+function peek(id) { const j = AppState.lastRunning.find(x => x.id === id); if (!j) return; AppState.viewing = id; openProgress(j.live ? `🔴 Recording ${j.label.replace(/^🔴 /, '')} live…` : j.label); updateProgress(j); }
 function showNextResult() { if (AppState.resultOpen || !AppState.results.length) return; const j = AppState.results.shift(); if (j.id === AppState.viewing) AppState.viewing = null; showResult(j); }
 function confetti() {
   if (ui.confetti !== '1' || (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches)) return;
@@ -633,11 +684,12 @@ async function loadWatches() {
   $('tbWatch').textContent = on || ''; $('rnWatch').textContent = on || ''; $('pillWatch').textContent = `👁 ${on} watching`; $('pillWatch').classList.toggle('on', on > 0);
   const ivs = d.intervals && d.intervals.length ? d.intervals : [15, 30, 60, 180, 360];
   const html = d.watches.length ? d.watches.map((w, i) => `<div class="file" style="--i:${i}">
-      <span class="fav${w.enabled ? ' live' : ''}">${w.kind === 'snapchat' ? '👻' : '🎬'}</span>
+      <span class="fav${w.enabled ? ' live' : ''}${w.rec ? ' rec' : ''}">${w.kind === 'snapchat' ? '👻' : w.kind === 'tiktok_live' ? '🔴' : '🎬'}</span>
       <div class="fmain"><div class="fname" title="${esc(w.target)}">${esc(w.label)}</div>
-        <div class="fmeta">${w.busy ? '⏳ checking now…' : esc(w.last_status)} · checked ${ago(w.last_check)}${w.enabled ? '' : ' · paused'} · ${w.total_new} downloaded</div></div>
+        <div class="fmeta">${w.rec ? `<b class="recnow">⏺ REC ${fmtDur(w.rec.secs || 0)} · ${esc(w.rec.size_h)}</b>` : w.busy ? '⏳ checking now…' : esc(w.last_status)} · checked ${ago(w.last_check)}${w.enabled ? '' : ' · paused'} · ${w.total_new} ${w.kind === 'tiktok_live' ? 'recorded' : 'downloaded'}</div></div>
       <div class="fctl">
-        <select class="wsel" data-wid="${esc(w.id)}" aria-label="Check how often">${ivs.map(m => `<option value="${m}"${m === w.interval ? ' selected' : ''}>every ${ivLabel(m)}</option>`).join('')}</select>
+        ${w.rec ? `<button class="mini del wact-stop" data-jid="${esc(w.rec.id)}" title="Stop recording and save it">⏹ Stop &amp; save</button>` : ''}
+        <select class="wsel" data-wid="${esc(w.id)}" aria-label="Check how often">${(w.kind === 'tiktok_live' && d.live_intervals ? d.live_intervals : ivs).map(m => `<option value="${m}"${m === w.interval ? ' selected' : ''}>every ${ivLabel(m)}</option>`).join('')}</select>
         <button class="mini wact-check" data-wid="${esc(w.id)}" title="Check this account now">Check</button>
         <button class="mini wact-toggle" data-wid="${esc(w.id)}">${w.enabled ? 'Pause' : 'Resume'}</button>
         <button class="mini del wact-del" data-wid="${esc(w.id)}" aria-label="Stop watching">✕</button></div></div>`).join('')
@@ -650,6 +702,7 @@ async function loadWatches() {
   document.querySelectorAll('.wact-check').forEach(el => el.addEventListener('click', e => wact(e.currentTarget.dataset.wid, 'check')));
   document.querySelectorAll('.wact-toggle').forEach(el => el.addEventListener('click', e => wact(e.currentTarget.dataset.wid, 'toggle')));
   document.querySelectorAll('.wact-del').forEach(el => el.addEventListener('click', e => wdel(e.currentTarget.dataset.wid)));
+  document.querySelectorAll('.wact-stop').forEach(el => el.addEventListener('click', async e => { const b = e.currentTarget; b.disabled = true; await api('/cancel/' + encodeURIComponent(b.dataset.jid), {method:'POST'}); toast('Stopping - the recording is being saved'); lastWatchHtml = ''; setTimeout(loadWatches, 1500); }));
 }
 
 async function addWatch(kind, target, label) {
@@ -658,7 +711,7 @@ async function addWatch(kind, target, label) {
 }
 const watchSnap = () => addWatch('snapchat', AppState.snapUser);
 function watchCreator() { AppState.chanUrl ? addWatch('channel', AppState.chanUrl, AppState.chanName) : toast('No creator link found for this video'); }
-function watchGo() { return AppState.mode === 'snap' ? watchSnap() : watchCreator(); }
+function watchGo() { return AppState.liveUser ? addWatch('tiktok_live', AppState.liveUser) : AppState.mode === 'snap' ? watchSnap() : watchCreator(); }
 async function setWInt(id, v) { const r = await post('/watches/' + encodeURIComponent(id) + '/interval', {interval: +v}); toast(r.success ? `Now checks every ${ivLabel(+v)}` : (r.message || 'Could not change')); lastWatchHtml = ''; loadWatches(); }
 async function wact(id, a) { await api(`/watches/${encodeURIComponent(id)}/${a}`, {method:'POST'}); lastWatchHtml = ''; loadWatches(); }
 async function wdel(id) { if (confirm('Stop watching this account?')) { await api('/watches/' + encodeURIComponent(id), {method:'DELETE'}); lastWatchHtml = ''; loadWatches(); } }
@@ -677,7 +730,7 @@ function takeLink(v) { setTab('home'); $('url').value = v; onUrlInput(); toast('
 
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
-    closeMaint(); closeSettings(); closeKeys(); closePicker(); closeFiles(); closeWatch(); closePin();
+    closeMaint(); closeSettings(); closeKeys(); closePicker(); closeFiles(); closeWatch(); closePin(); closeQueue();
     if ($('modal').classList.contains('open')) { AppState.resultOpen ? closeResult() : hideProgress(); }
     return;
   }
@@ -689,6 +742,7 @@ document.addEventListener('keydown', e => {
   else if (k === 's') openSettings(); else if (k === 't') openMaint(); else if (k === 'h') setTab('home');
   else if (k === 'w') openWatch();
   else if (k === 'f') openFiles();
+  else if (k === 'q') openQueue();
   else if (e.key === '?') $('kmodal').classList.add('open');
 });
 
@@ -731,9 +785,16 @@ async function restartApp() {
 }
 
 /* ---------- settings ---------- */
+const TPL_SAMPLE = {title:'My cool video', uploader:'Creator', id:'a1B2c3', date:'2026-10-31', resolution:'1080p', playlist_index:'07'};
+function tplPreview() { const t = $('nameTpl').value.trim(); $('tplprev').textContent = t ? 'Example: ' + t.replace(/\{(\w+)\}/g, (m, k) => TPL_SAMPLE[k] ?? m) + '.mp4' : 'Now: the title and the video id, like “My cool video [a1B2c3].mp4”.'; }
+async function saveTpl() { const r = await post('/settings', {name_template: $('nameTpl').value.trim()}); $('nameTpl').value = r.name_template || ''; tplPreview(); toast(r.name_template ? 'Name template saved ✓' : 'Back to the normal name'); }
 async function loadSettings() {
   const d = await api('/settings');
-  if (d.success) { $('ntfy').value = d.ntfy || ''; $('creatorFolders').checked = d.creator_folders !== false; $('igOrganize').checked = d.ig_organize !== false; $('autoName').value = d.auto_name || 'date'; $('preferH264').checked = d.prefer_h264 !== false; $('notifyDl').checked = !!d.notify_downloads; $('igcap').value = d.ig_cap || 30; }
+  if (d.success) { $('ntfy').value = d.ntfy || ''; $('creatorFolders').checked = d.creator_folders !== false; $('igOrganize').checked = d.ig_organize !== false; $('autoName').value = d.auto_name || 'date'; $('preferH264').checked = d.prefer_h264 !== false; $('notifyDl').checked = !!d.notify_downloads; $('igcap').value = d.ig_cap || 30;
+    $('nameTpl').value = d.name_template || ''; $('speedLimit').value = d.speed_limit || '0'; $('parallelParts').value = String(d.parallel_parts || 1); $('paceSel').value = d.pace || 'off'; $('retryCount').value = String(d.retry_count ?? 3); $('cleanUrls').checked = d.clean_urls !== false; tplPreview();
+    if ($('liveQuality')) $('liveQuality').value = d.live_quality || 'best';
+    if ($('liveHelper')) { $('liveHelper').checked = d.live_helper !== false; $('liveMax').value = String(d.live_max_hours || 6); $('liveReady').textContent = d.live_ready === false ? '⚠ curl_cffi is not installed on the server - TikTok will block live checks more often. Rebuild the Docker image.' : ''; }
+    if ($('digestSel')) { $('digestSel').value = d.digest || 'off'; $('digestHour').value = String(d.digest_hour ?? 20); digestNote(d.digest_waiting || 0); } }
   $('clipOn').checked = clipEnabled(); loadVersion(); loadIg();
 }
 async function setCreatorFolders() { await post('/settings', {creator_folders: $('creatorFolders').checked}); toast($('creatorFolders').checked ? 'New downloads go into creator folders' : 'Creator folders off'); }
@@ -819,6 +880,17 @@ function initStaticEventBindings() {
   safeBind('testNtfyBtn', 'click', testSettings);
   safeBind('creatorFolders', 'change', setCreatorFolders);
   safeBind('notifyDl', 'change', async () => { await post('/settings', {notify_downloads: $('notifyDl').checked}); toast($('notifyDl').checked ? 'You will get an alert when your downloads finish' : 'Download alerts off'); });
+  safeBind('nameTpl', 'input', tplPreview); safeBind('saveTplBtn', 'click', saveTpl);
+  document.querySelectorAll('#tplChips [data-tpl]').forEach(b => b.addEventListener('click', () => { const i = $('nameTpl'); i.value = (i.value + b.dataset.tpl).slice(0, 150); tplPreview(); i.focus(); }));
+  [['speedLimit', 'speed_limit', 'Speed limit saved'], ['parallelParts', 'parallel_parts', 'Parallel parts saved'], ['paceSel', 'pace', 'Pause setting saved'], ['retryCount', 'retry_count', 'Retries saved']]
+    .forEach(([id, key, msg]) => safeBind(id, 'change', async () => { await post('/settings', {[key]: $(id).value}); toast(msg + ' ✓'); }));
+  safeBind('cleanUrls', 'change', async () => { await post('/settings', {clean_urls: $('cleanUrls').checked}); toast($('cleanUrls').checked ? 'Links are cleaned' : 'Links are kept as pasted'); });
+  safeBind('pickVideosBtn', 'click', openPl); safeBind('closePlBtn', 'click', closePl); safeBind('plGoBtn', 'click', plGo);
+  safeBind('plAllBtn', 'click', () => { plShown().forEach(e => pl.sel.add(e.index)); renderPl(); });
+  safeBind('plNoneBtn', 'click', () => { pl.sel.clear(); renderPl(); });
+  safeBind('plFilter', 'input', () => { pl.q = $('plFilter').value.trim(); renderPl(); });
+  $('plist').addEventListener('click', e => { const t = e.target.closest('.prow'); if (!t) return; const i = +t.dataset.i; pl.sel.has(i) ? pl.sel.delete(i) : pl.sel.add(i); renderPl(); });
+  const plm = $('plmodal'); plm.addEventListener('click', e => { if (e.target === plm) closePl(); });
   safeBind('preferH264', 'change', async () => { await post('/settings', {prefer_h264: $('preferH264').checked}); toast($('preferH264').checked ? 'New videos: iPhone-friendly (H.264)' : 'New videos: best quality, any format'); });
   safeBind('phoneSetupBtn', 'click', () => showPhoneSetup(false));
   safeBind('autoName', 'change', async () => { await post('/settings', {auto_name: $('autoName').value}); toast($('autoName').value === 'date' ? 'Empty name = date + number' : 'Empty name = keep the original title'); });
@@ -839,6 +911,8 @@ function initStaticEventBindings() {
   const tabHome = document.querySelector('nav.tabbar [data-tab="home"]');
   const tabWatch = document.querySelector('nav.tabbar [data-tab="watch"]');
   if(tabHome) tabHome.addEventListener('click', () => setTab('home'));
+  const tabLive = document.querySelector('nav.tabbar [data-tab="live"]');
+  if(tabLive) tabLive.addEventListener('click', () => setTab('live'));
   if(tabWatch) tabWatch.addEventListener('click', openWatch);
 
   safeBind('navSettingsBtn', 'click', openSettings);
@@ -1067,8 +1141,9 @@ const xThumb = it => '/fs/thumb?path=' + encodeURIComponent(it.path);
 const XICON = {video:'🎬', photo:'🖼️', audio:'🎵', other:'📄'};
 const XFOLD = '<svg class="xfold" viewBox="0 0 64 52" aria-hidden="true"><path d="M4 8a4 4 0 0 1 4-4h14l6 6h28a4 4 0 0 1 4 4v30a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4z" fill="currentColor" opacity=".5"/><path d="M4 18a4 4 0 0 1 4-4h48a4 4 0 0 1 4 4v26a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4z" fill="currentColor"/></svg>';
 const xHuman = n => { for (const u of ['B','KB','MB','GB','TB']) { if (n < 1024 || u === 'TB') return (u === 'B' ? Math.round(n) : n.toFixed(1)) + ' ' + u; n /= 1024; } };
+const XSMART = ['vertical','horizontal','square','4k','hd','short','long'];
 const xGroup = t => t[0] === '@' ? 'users' : ['youtube','tiktok','snapchat','instagram','general'].includes(t) ? 'sites'
-  : ['video','photo','audio','posts','reels','stories','highlights','tagged','profile-picture'].includes(t) ? 'types' : /^\d{4}-\d{2}$/.test(t) ? 'dates' : 'custom';
+  : ['video','photo','audio','posts','reels','stories','highlights','tagged','profile-picture'].includes(t) ? 'types' : XSMART.includes(t) ? 'smart' : /^\d{4}-\d{2}$/.test(t) ? 'dates' : 'custom';
 const xChip = t => `<b class="tgc tg-${xGroup(t)}">${esc(t)}</b>`;
 const xSel = () => X.rows.filter(r => X.sel.has(r.path));
 const xDate = ts => new Date(ts * 1000).toLocaleString(undefined, {dateStyle:'medium', timeStyle:'short'});
@@ -1080,6 +1155,8 @@ async function xLoad(keepSel) {
   const my = ++X.seq; let r;
   if (xSearching()) { const qs = new URLSearchParams(); if (X.q) qs.set('q', X.q); X.tags.forEach(t => qs.append('tag', t)); r = await api('/fs/search?' + qs); }
   else if (X.path === '@recent') r = await api('/fs/search?recent=1');
+  else if (X.path === '@dupes') { r = await api('/fs/dupes'); if (r.success) { X.dupes = r; r.items = r.groups.flatMap((g, gi) => g.items.map((it, k) => Object.assign(it, {_g:gi, _k:k}))); } }
+  else if (X.path === '@storage') { r = await api('/fs/storage'); if (r.success) { X.storage = r; r.items = []; } }
   else r = await api('/fs/list?path=' + encodeURIComponent(X.path));
   if (my !== X.seq) return;
   if (!r.success && r.locked) { closeFiles(); return toast('The files are locked again - open them again'); }
@@ -1110,9 +1187,10 @@ const xTile = (it, i) => {
     + `<div class="xdt">${esc(xDate(it.modified))}</div><button class="xmore" aria-label="More">⋯</button></div>`;
 };
 function xRender() {
-  X.rows = xSorted(X.rows);
+  const special = !xSearching() && (X.path === '@dupes' || X.path === '@storage');
+  if (!special) X.rows = xSorted(X.rows);
   const g = $('xgrid'); g.className = 'xgrid ' + X.view + (X.selMode ? ' selmode' : ''); g.style.setProperty('--xs', X.size + 'px');
-  g.innerHTML = X.rows.length ? X.rows.map(xTile).join('')
+  g.innerHTML = special ? (X.path === '@dupes' ? xDupesHtml() : xStorageHtml()) : X.rows.length ? X.rows.map(xTile).join('')
     : `<div class="empty" style="grid-column:1/-1"><b>${xSearching() ? '🔍' : '📭'}</b>${xSearching() ? 'Nothing matches your search.' : X.path ? 'This folder is empty.' : 'No downloads yet.'}</div>`;
   $('xGrid').classList.toggle('on', X.view === 'grid'); $('xList').classList.toggle('on', X.view === 'list');
   $('xsort').value = X.sort; $('xdesc').classList.toggle('asc', !X.desc); $('xsize').value = X.size;
@@ -1123,6 +1201,8 @@ function xCrumbs() {
   let h;
   if (xSearching()) h = '<button data-go="">🏠</button><span>›</span><b>Search results</b>';
   else if (X.path === '@recent') h = '<button data-go="">🏠</button><span>›</span><b>Recent</b>';
+  else if (X.path === '@dupes') h = '<button data-go="">🏠</button><span>›</span><b>Duplicates</b>';
+  else if (X.path === '@storage') h = '<button data-go="">🏠</button><span>›</span><b>Storage</b>';
   else { const ps = X.path ? X.path.split('/') : []; h = '<button data-go="">🏠 Home</button>' + ps.map((p, i) => `<span>›</span><button data-go="${esc(ps.slice(0, i + 1).join('/'))}">${esc(p)}</button>`).join(''); }
   $('xcrumbs').innerHTML = h;
 }
@@ -1132,7 +1212,7 @@ function xStatus() {
   $('xstat').textContent = `${X.rows.length} item${X.rows.length === 1 ? '' : 's'}` + (s.length ? ` · ${s.length} selected${size ? ' (' + xHuman(size) + ')' : ''}` : '') + (xSearching() ? ' · search results' : '');
   xActBar();
 }
-const XGROUPS = [['sites','🌐','Sites'], ['users','👤','Users'], ['types','🎞️','Types'], ['custom','🏷️','My tags'], ['dates','📅','Months']];
+const XGROUPS = [['sites','🌐','Sites'], ['users','👤','Users'], ['types','🎞️','Types'], ['smart','✨','Shape & length'], ['custom','🏷️','My tags'], ['dates','📅','Months']];
 function xNav() {
   const T = (X.tagsAll && X.tagsAll.tags) || [];
   const btns = XGROUPS.map(([g, ico, label]) => {
@@ -1142,6 +1222,8 @@ function xNav() {
   }).join('');
   $('xnav').innerHTML = `<button data-go="" class="${!X.path && !xSearching() ? 'on' : ''}"><span>🏠 All files</span></button>`
     + `<button data-go="@recent" class="${X.path === '@recent' && !xSearching() ? 'on' : ''}"><span>🕒 Recent</span></button>`
+    + `<button data-go="@dupes" class="${X.path === '@dupes' && !xSearching() ? 'on' : ''}"><span>👯 Duplicates</span></button>`
+    + `<button data-go="@storage" class="${X.path === '@storage' && !xSearching() ? 'on' : ''}"><span>📊 Storage</span></button>`
     + `<h5>Filter by</h5>` + btns
     + (X.tags.length ? `<button data-clear="1"><span style="color:var(--err)">✕ Clear filters</span><em>${X.tags.length}</em></button>` : '');
   if (X.tagsAll) $('xdisk').textContent = `${X.tagsAll.files} files · ${X.tagsAll.total_h} used · ${X.tagsAll.free_h} free`;
@@ -1422,7 +1504,7 @@ function initExplorer() {
   /* rubber-band selection: hold the left button on empty space and drag a rectangle (like Windows) */
   const band = $('xband'); let bs = null;
   sc.addEventListener('mousedown', e => {
-    if (e.button !== 0 || e.target.closest('.xi')) return;
+    if (e.button !== 0 || e.target.closest('.xi, .xpanel')) return;
     const r = sc.getBoundingClientRect();
     if (e.clientX - r.left >= sc.clientWidth || e.clientY - r.top >= sc.clientHeight) return;      // that was the scrollbar
     e.preventDefault(); sc.focus({preventScroll:true});
@@ -1597,7 +1679,7 @@ function initShell() {
   });
   document.querySelectorAll('#rail [data-nav]').forEach(b => b.addEventListener('click', () => {
     const n = b.dataset.nav;
-    if (n === 'home') setTab('home'); else if (n === 'watch') openWatch(); else if (n === 'files') openFiles();
+    if (n === 'home') setTab('home'); else if (n === 'live') setTab('live'); else if (n === 'watch') openWatch(); else if (n === 'files') openFiles(); else if (n === 'queue') openQueue();
     else if (n === 'settings') openSettings(); else if (n === 'keys') $('kmodal').classList.add('open');
   }));
   safeBind('navFilesBtn', 'click', openFiles);
@@ -1667,3 +1749,275 @@ if (document.readyState === 'loading') {
 } else {
     bootApp();
 }
+
+/* ================= download queue: reorder, hold, pause, cancel ================= */
+const Q = {timer:null, busy:false};
+const qIds = () => [...new Set([...tracked(), ...groups().flat()])];
+function openQueue() { $('qmodal').classList.add('open'); qLoad(); clearInterval(Q.timer); Q.timer = setInterval(qLoad, 1500); }
+function closeQueue() { if (!$('qmodal')) return; $('qmodal').classList.remove('open'); clearInterval(Q.timer); Q.timer = null; }
+async function qLoad() {
+  if (Q.busy) return; Q.busy = true;
+  try {
+    const ids = qIds();
+    const d = ids.length ? await api('/queue?ids=' + ids.map(encodeURIComponent).join(',')) : {success:true, jobs:[], slots:3};
+    if (d.success) qRender(d.jobs || [], d.slots || 3);
+  } finally { Q.busy = false; }
+}
+function qRender(jobs, slots) {
+  const run = jobs.filter(j => j.status === 'running'), wait = jobs.filter(j => j.status === 'queued'), held = jobs.filter(j => j.status === 'paused');
+  $('qsum').textContent = jobs.length ? `${run.length} of ${slots} slots busy · ${wait.length} waiting${held.length ? ' · ' + held.length + ' paused' : ''}` : '';
+  $('qPauseAll').disabled = !(run.some(j => j.can_pause) || wait.length); $('qResumeAll').disabled = !held.length;
+  const row = (j, i, list) => {
+    const st = j.status, p = Math.round(j.progress || 0);
+    const btn = (a, ico, lab, dis) => `<button class="qb${a === 'cancel' ? ' del' : ''}" data-qa="${a}" data-id="${esc(j.id)}" title="${lab}" aria-label="${lab}"${dis ? ' disabled' : ''}>${ico}</button>`;
+    const move = st === 'queued' ? btn('top', '⤒', 'Start next', i === 0) + btn('up', '↑', 'Move up', i === 0) + btn('down', '↓', 'Move down', i === list.length - 1) : '';
+    const pr = st === 'paused' ? btn('resume', '▶', 'Resume') : (st === 'queued' || j.can_pause) ? btn('pause', '⏸', 'Pause') : '';
+    return `<div class="qrow q-${st}${j.live ? ' q-live' : ''}"><div class="qpos">${j.live && st === 'running' ? '<b class="recdot">REC</b>' : st === 'running' ? `<div class="pring${p < 1 ? ' ind' : ''}" style="--p:${p};--ringbg:var(--modal)"><b>${p}</b></div>` : st === 'queued' ? `<b>#${j.position || i + 1}</b>` : '⏸'}</div>`
+      + `<div class="qmain"><b>${esc(j.label)}</b><small>${esc(j.message || '')}${j.speed ? ' · ' + esc(j.speed) : ''}${j.eta ? ' · ETA ' + esc(j.eta) : ''}</small>${st === 'running' && !j.live ? `<div class="qbar"><i style="width:${p}%"></i></div>` : ''}</div>`
+      + `<div class="qctl">${move}${pr}${j.live ? btn('cancel', '⏹', 'Stop &amp; save') : btn('cancel', '✕', 'Cancel')}</div></div>`;
+  };
+  const sec = (t, list) => list.length ? `<div class="qh">${t}<em>${list.length}</em></div>` + list.map(row).join('') : '';
+  $('qlist').innerHTML = jobs.length ? sec('⚡ Downloading now', run) + sec('⏳ Waiting in line', wait) + sec('⏸ Paused', held)
+    : '<div class="empty"><b>🧘</b>Nothing in the queue. Paste a few links (or use “Paste many links at once”) and they line up here.</div>';
+}
+async function qAct(id, a) {
+  const r = await post(`/queue/${encodeURIComponent(id)}/${a}`, {});
+  if (!r.success) toast(r.message || 'That did not work'); else if (a === 'pause') toast('Paused - it continues where it stopped');
+  qLoad(); watch();
+}
+async function qAll(a) {
+  const d = await api('/queue?ids=' + qIds().map(encodeURIComponent).join(',')); if (!d.success) return;
+  const list = (d.jobs || []).filter(j => a === 'pause' ? (j.status === 'queued' || (j.status === 'running' && j.can_pause)) : j.status === 'paused');
+  for (const j of list) await post(`/queue/${encodeURIComponent(j.id)}/${a}`, {});
+  toast(list.length ? (a === 'pause' ? `Paused ${list.length}` : `Resumed ${list.length}`) : 'Nothing to change'); qLoad(); watch();
+}
+
+/* ================= watchlist digest ================= */
+function digestNote(n) {
+  const on = $('digestSel').value === 'daily';
+  $('digestHourBox').hidden = !on;
+  $('digestMsg').textContent = on ? (n ? `${n} new post${n === 1 ? '' : 's'} waiting for the next digest.` : 'Nothing waiting yet.') : 'You get one alert per account, right when it posts.';
+}
+async function saveDigest() {
+  const r = await post('/settings', {digest: $('digestSel').value, digest_hour: $('digestHour').value});
+  if (!r.success) return toast(r.message || 'Could not save');
+  digestNote(r.digest_waiting || 0); toast(r.digest === 'daily' ? `One digest a day at ${String(r.digest_hour).padStart(2, '0')}:00 ✓` : 'Instant watchlist alerts ✓');
+}
+
+/* ================= theme presets ================= */
+const LOOKS_THEME = {classic:'dark', midnight:'dark', neon:'dark', sunset:'dark', paper:'light'};
+function applyLook(p) {
+  if (!LOOKS_THEME[p]) return;
+  ui.palette = p; ui.theme = LOOKS_THEME[p];
+  try { localStorage.setItem(UI_KEY, JSON.stringify(ui)); } catch {}
+  applyUi(); toast(`${p[0].toUpperCase() + p.slice(1)} look ✓`);
+}
+
+/* ================= files: duplicates + storage ================= */
+function xDupesHtml() {
+  const d = X.dupes; if (!d) return '';
+  if (!d.groups.length) return '<div class="xpanel empty" style="grid-column:1/-1"><b>✨</b>No duplicates - every file is saved only once.</div>';
+  let i = 0;
+  const head = `<div class="xpanel xbanner" style="grid-column:1/-1"><div><b>${d.extra} extra cop${d.extra === 1 ? 'y' : 'ies'}</b> in ${d.groups.length} group${d.groups.length === 1 ? '' : 's'} · ${esc(d.wasted_h)} you could free</div>`
+    + `<div class="xbtns"><button class="btn ghost" data-dsel="1">☑ Select the extra copies</button></div>`
+    + `<p class="xhint">The oldest file in each group is the one kept. “Same video” groups are different files of one video (e.g. 720p and 1080p) - look before you delete.</p></div>`;
+  return head + d.groups.map(g => `<div class="xpanel xgh" style="grid-column:1/-1"><span class="tgc ${g.reason === 'identical' ? 'tg-sites' : 'tg-dates'}">${g.reason === 'identical' ? '🟰 identical' : '🎬 same video'}</span><b>${g.items.length} copies</b><em>${esc(g.wasted_h)} extra</em></div>`
+    + g.items.map(it => { const html = xTile(it, i); i++; return it._k === 0 ? html.replace('<div class="xth">', '<div class="xth"><i class="xkeep">KEEP</i>') : html; }).join('')).join('');
+}
+const xBar = (rows, max, cls) => rows.map(r => `<div class="sbar ${cls || ''}"${r.go !== undefined ? ` data-sgo="${esc(r.go)}" role="button" tabindex="0"` : ''}><span>${esc(r.label || r.name)}</span><i><u style="width:${max ? Math.max(2, r.size / max * 100) : 0}%;${r.c ? '--c:' + r.c : ''}"></u></i><em>${esc(r.size_h)}</em></div>`).join('');
+function xStorageHtml() {
+  const s = X.storage; if (!s) return '';
+  const SITE_C = {youtube:'#ff4d5e', tiktok:'#25f4ee', instagram:'#f472b6', snapchat:'#fffc00', general:'#a78bfa'};
+  const KIND = {video:['🎬 Videos','#8b5cf6'], photo:['🖼️ Photos','#22d3ee'], audio:['🎵 Audio','#34d399'], other:['📄 Other','#9aa0c3']};
+  const dk = s.disk, other = Math.max(0, dk.used - s.total), pc = v => (v / dk.total * 100).toFixed(1);
+  const maxOf = a => Math.max(0, ...a.map(r => r.size));
+  const sites = s.sites.map(r => Object.assign({}, r, {label:r.name, c:SITE_C[r.name], go:r.name}));
+  const users = s.users.map(r => Object.assign({}, r, {label:r.name.split('/')[1] + '  ·  ' + r.name.split('/')[0], go:r.name}));
+  const kinds = s.kinds.map(r => Object.assign({}, r, {label:(KIND[r.name] || [r.name])[0], c:(KIND[r.name] || [])[1]}));
+  const mmax = maxOf(s.months);
+  const months = s.months.map(m => `<div class="mcol" title="${esc(m.name)}: ${esc(m.size_h)}"><i style="height:${mmax ? Math.max(3, m.size / mmax * 100) : 0}%"></i><span>${esc(m.name.slice(5))}</span></div>`).join('');
+  const clean = (k, ico, t, desc) => { const c = s.cleanup[k]; return `<div class="cl"><b>${ico} ${t}</b><small>${desc}</small><div class="clrow"><em>${c.count} file${c.count === 1 ? '' : 's'} · ${esc(c.size_h)}</em><button class="btn ghost" data-clean="${k}" data-n="${c.count}"${c.count ? '' : ' disabled'}>Clean up</button></div></div>`; };
+  return `<div class="xpanel stg" style="grid-column:1/-1">
+    <section class="scard wide"><h4>💾 Disk</h4>
+      <div class="disk"><i class="d1" style="width:${pc(s.total)}%" title="Media Hub"></i><i class="d2" style="width:${pc(other)}%" title="Other files"></i></div>
+      <div class="dleg"><span><i class="d1"></i>Media Hub <b>${esc(s.total_h)}</b></span><span><i class="d2"></i>Other files <b>${esc(xHuman(other))}</b></span><span><i></i>Free <b>${esc(dk.free_h)}</b></span><span class="xhint">${s.files} files · disk ${esc(dk.total_h)}</span></div></section>
+    <section class="scard"><h4>🌐 By site</h4>${xBar(sites, maxOf(sites)) || '<p class="xhint">Nothing yet.</p>'}</section>
+    <section class="scard"><h4>🎞️ By type</h4>${xBar(kinds, maxOf(kinds)) || '<p class="xhint">Nothing yet.</p>'}</section>
+    <section class="scard"><h4>👤 Biggest creators <small>tap to open</small></h4>${xBar(users, maxOf(users)) || '<p class="xhint">No creator folders yet.</p>'}</section>
+    <section class="scard"><h4>📅 Added per month</h4><div class="months">${months || '<p class="xhint">Nothing yet.</p>'}</div></section>
+    <section class="scard wide"><h4>🧹 Cleanup <small>deleting cannot be undone</small></h4><div class="cls">
+      ${clean('dupes', '👯', 'Extra identical copies', 'Keeps the oldest copy of each file.')}
+      ${clean('partials', '🧩', 'Unfinished downloads', 'Leftover .part files older than 3 hours.')}
+      ${clean('sidecars', '📝', 'Info side files', 'yt-dlp .description and .info.json files.')}
+    </div></section></div>`;
+}
+async function xClean(what, n) {
+  const names = {dupes:'extra identical copies', partials:'unfinished download leftovers', sidecars:'info side files'};
+  if (!confirm(`Delete ${n} ${names[what]}?\n\nThis cannot be undone.`)) return;
+  const r = await xPost('/fs/cleanup', {what}); if (r.success) toast(`Deleted ${r.deleted} file${r.deleted === 1 ? '' : 's'} · freed ${r.freed_h}`); xAfter();
+}
+
+(function initExtras() {
+  safeBind('closeQueueBtn', 'click', closeQueue); safeBind('qPauseAll', 'click', () => qAll('pause')); safeBind('qResumeAll', 'click', () => qAll('resume'));
+  const qm = $('qmodal'); if (qm) qm.addEventListener('click', e => { if (e.target === qm) closeQueue(); const b = e.target.closest('[data-qa]'); if (b) qAct(b.dataset.id, b.dataset.qa); });
+  $('strip').addEventListener('click', e => { if (e.target.closest('[data-openq]')) { e.stopPropagation(); openQueue(); } });
+  safeBind('pillRun', 'click', openQueue);
+  safeBind('digestSel', 'change', saveDigest); safeBind('digestHour', 'change', saveDigest);
+  safeBind('digestNowBtn', 'click', async () => { const r = await post('/digest/send', {}); toast(r.message || 'Done'); loadSettings(); });
+  document.querySelectorAll('[data-look]').forEach(b => b.addEventListener('click', () => applyLook(b.dataset.look)));
+  applyUi();
+  $('xgrid').addEventListener('click', e => {
+    const c = e.target.closest('[data-clean]'), g = e.target.closest('[data-sgo]'), s = e.target.closest('[data-dsel]');
+    if (c) { e.stopPropagation(); xClean(c.dataset.clean, c.dataset.n); }
+    else if (g) { e.stopPropagation(); xGo(g.dataset.sgo); }
+    else if (s) { e.stopPropagation(); X.selMode = true; X.sel = new Set(X.rows.filter(r => r._k > 0).map(r => r.path)); xRender(); }
+  }, true);
+  $('xgrid').addEventListener('keydown', e => { const g = e.target.closest('[data-sgo]'); if (g && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); xGo(g.dataset.sgo); } });
+})();
+
+
+/* ================= TikTok LIVE ================= */
+function liveWint(on) {
+  const w = $('wint'); if (!w) return;
+  if (AppState.wintHtml === undefined) AppState.wintHtml = w.innerHTML;
+  if (on && !w.dataset.live) { w.innerHTML = [2, 5, 10, 15, 30].map(m => `<option value="${m}"${m === 5 ? ' selected' : ''}>every ${m} min</option>`).join(''); w.dataset.live = '1'; }
+  else if (!on && w.dataset.live) { w.innerHTML = AppState.wintHtml; delete w.dataset.live; }
+}
+function liveCard(r) {
+  const L = r.live; setHint(''); AppState.liveOn = !!L.is_live;
+  $('siteBadge').textContent = L.is_live ? '🔴 LIVE' : 'TikTok LIVE';
+  if (r.thumbnail) { $('preview').classList.remove('no-thumb'); $('thumb').className = 'thumb'; $('thumb').style.display = ''; setThumb(r.thumbnail); }
+  else { $('preview').classList.add('no-thumb'); $('thumb').style.display = 'none'; }
+  $('ptitle').textContent = r.title; $('plnote').style.display = 'none';
+  const chips = [L.is_live ? ['🔴 Live now', 'ok'] : '⚫ Not live', '👤 @' + L.user, `📁 tiktok/${L.user}/lives/`];
+  if (L.recording) chips.push(['⏺ Already recording', 'ok']);
+  $('chips').innerHTML = chips.map(chipHtml).join('');
+  $('watchTxt').textContent = `🔴 Record automatically whenever @${L.user} goes live`; $('watchrow').classList.add('show');
+  refreshOpts();
+}
+(function initLive() {
+  safeBind('liveHelper', 'change', async () => { await post('/settings', {live_helper: $('liveHelper').checked}); toast($('liveHelper').checked ? 'Helper on - used only when TikTok blocks the check' : 'Helper off - only TikTok itself is asked'); });
+  safeBind('liveQuality', 'change', async () => { const r = await post('/settings', {live_quality: $('liveQuality').value}); toast(r.success ? 'New recordings: ' + $('liveQuality').selectedOptions[0].text : 'Could not save'); });
+  safeBind('liveMax', 'change', async () => { const r = await post('/settings', {live_max_hours: $('liveMax').value}); toast(r.success ? `Recordings stop after ${r.live_max_hours} h at most` : (r.message || 'Could not save')); });
+})();
+
+
+/* ================= Live page ================= */
+var LV = {timer:null, tick:null, skew:0, html:{}, saved:null, filter:''};   // var: setTab() may run before this line
+const lvUser = v => { v = String(v || '').trim(); const m = v.match(LIVE_RE); if (m) return m[1]; v = v.replace(/^@/, ''); return /^[A-Za-z0-9._-]{2,24}$/.test(v) ? v : ''; };
+const lvLink = u => `https://www.tiktok.com/@${encodeURIComponent(u)}/live`;
+const lvAgo = ts => ts ? ago(ts) : 'not yet';
+const lvIn = ts => { if (!ts) return 'soon'; const m = Math.round((ts - Date.now() / 1000 + LV.skew) / 60); return m <= 0 ? 'any moment' : `in ${m} min`; };
+const lvSet = (id, html) => { if (LV.html[id] !== html) { LV.html[id] = html; $(id).innerHTML = html; } };
+const lvAv = (u, live) => `<span class="lvav${live ? ' on' : ''}" style="--h:${[...u].reduce((a, c) => a + c.charCodeAt(0), 0) % 360}"><span>${esc(u[0].toUpperCase())}</span>${live ? '<i>LIVE</i>' : ''}</span>`;
+
+function lvOpen() { if (!LV) return; lvLoad(); lvSaved(); clearInterval(LV.timer); LV.timer = setInterval(lvLoad, 3000); clearInterval(LV.tick); LV.tick = setInterval(lvTick, 1000); }
+function lvClose() { if (!LV) return; clearInterval(LV.timer); clearInterval(LV.tick); LV.timer = LV.tick = null; }
+async function lvLoad() {
+  const d = await api('/live/overview'); if (!d.success) return;
+  LV.skew = Date.now() / 1000 - d.now; lvBadge(d.recording.length);
+  if (document.body.dataset.tab === 'live') lvRender(d);
+}
+function lvBadge(n) { ['rnLive', 'tbLive'].forEach(id => { if ($(id)) $(id).textContent = n || ''; }); }
+setInterval(() => { if (!document.hidden && document.body.dataset.tab !== 'live') lvLoad(); }, 15000); setTimeout(lvLoad, 1500);
+
+function lvRender(d) {
+  const recU = new Set(d.recording.map(r => r.user.toLowerCase()));
+  const liveN = new Set([...recU, ...d.accounts.filter(a => /^🔴/.test(a.last_status)).map(a => a.user.toLowerCase())]).size;
+  lvSet('lvStats', [[d.accounts.length, 'watched'], [liveN, 'live now'], [d.recording.length, 'recording'], LV.saved ? [LV.saved.count, 'saved'] : null]
+    .filter(Boolean).map(([n, l]) => `<span class="lvstat${l === 'recording' && n ? ' hot' : ''}"><b>${n}</b>${l}</span>`).join('')
+    + `<span class="lvstat lvqpill" title="Change in Settings → Downloads">✦ ${({best:'Original quality', hd:'HD quality', sd:'SD quality'})[d.quality] || 'Original quality'}</span>`);
+  $('lvRecCount').textContent = d.recording.length || ''; $('lvAccCount').textContent = d.accounts.length || '';
+  lvSet('lvRec', d.recording.length ? d.recording.map((r, i) => `<div class="lvcard lvrecc" style="--i:${i}">
+      ${r.cover ? `<div class="lvcover" style="background-image:url('${esc(r.cover).replace(/'/g, '%27')}')"></div>` : ''}
+      <div class="lvtop">${lvAv(r.user, true)}<div class="lvwho"><b>@${esc(r.user)}</b><small>${esc(r.title || 'Live on TikTok')}</small></div><span class="lveq" aria-hidden="true"><i></i><i></i><i></i><i></i></span><b class="recdot">● REC</b></div>
+      ${r.quality ? `<div class="lvq">✦ ${esc(r.quality)}</div>` : ''}
+      <div class="lvnums">
+        <div><em>Time</em><b class="lvtime" data-start="${r.started || 0}">${fmtDur(r.secs || 0)}</b></div>
+        <div><em>Size</em><b>${esc(r.size_h)}</b></div>
+        <div><em>Speed</em><b>${esc(r.speed || '–')}</b></div>
+        <div><em>Viewers</em><b>${r.viewers == null ? '–' : new Intl.NumberFormat('en', {notation:'compact'}).format(r.viewers)}</b><small>${r.peak ? 'peak ' + new Intl.NumberFormat('en', {notation:'compact'}).format(r.peak) : ''}</small></div>
+      </div>
+      <div class="lvbtns"><button class="btn ghost lvmark" data-lvmark="${esc(r.id)}" title="Mark this moment - it becomes a chapter in the video">⭐ Mark moment${r.marks ? ` <em>${r.marks}</em>` : ''}</button><a class="btn ghost" href="${lvLink(r.user)}" target="_blank" rel="noopener noreferrer">↗ TikTok</a><button class="btn ghost lvdanger" data-lvstop="${esc(r.id)}">⏹ Stop &amp; save</button></div></div>`).join('')
+    : '<div class="lvempty">Nothing is recording. When a watched account goes live, it shows up here by itself.</div>');
+  const ivs = d.intervals || [2, 5, 10, 15, 30];
+  lvSet('lvAcc', d.accounts.length ? d.accounts.map(a => {
+    const rec = recU.has(a.user.toLowerCase()), warn = /^⚠/.test(a.last_status);
+    const st = rec ? ['rec', '● Recording'] : !a.enabled ? ['off', 'Paused'] : a.busy ? ['chk', 'Checking…'] : warn ? ['warn', '⚠ Check failed'] : /^🔴/.test(a.last_status) ? ['rec', 'Live'] : ['idle', 'Not live'];
+    return `<div class="lvcard lvaccc s-${st[0]}" style="--i:${d.accounts.indexOf(a)}">
+      <div class="lvtop">${lvAv(a.user, st[0] === 'rec')}<div class="lvwho"><b>@${esc(a.user)}</b><small>${a.total} recorded</small></div><span class="lvchip c-${st[0]}">${st[1]}</span></div>
+      <div class="lvmeta">${warn ? esc(a.last_status) + '<br>' : ''}Checked ${lvAgo(a.last_check)}${a.enabled ? ` · next ${lvIn(a.next_check)}` : ''}${a.habit ? `<br><span class="lvhabit">🕘 ${esc(a.habit)}</span>` : a.lives_seen ? `<br><span class="lvhabit">🕘 Learning their schedule (${a.lives_seen}/3 lives)</span>` : ''}</div>
+      <div class="lvctl">
+        <select class="wsel" data-lvint="${esc(a.id)}" aria-label="Check how often">${ivs.map(m => `<option value="${m}"${m === a.interval ? ' selected' : ''}>every ${ivLabel(m)}</option>`).join('')}</select>
+        <button class="mini" data-lvact="check" data-id="${esc(a.id)}">Check now</button>
+        ${rec ? '' : `<button class="mini" data-lvrec="${esc(a.user)}">🔴 Record</button>`}
+        <button class="mini" data-lvact="toggle" data-id="${esc(a.id)}">${a.enabled ? 'Pause' : 'Resume'}</button>
+        <a class="mini" href="${lvLink(a.user)}" target="_blank" rel="noopener noreferrer" aria-label="Open @${esc(a.user)} on TikTok">↗</a>
+        <button class="mini del" data-lvdel="${esc(a.id)}" aria-label="Stop watching @${esc(a.user)}">✕</button>
+      </div></div>`;
+  }).join('') : '<div class="lvempty">No accounts yet. Type a username above and press <b>Watch</b>.</div>');
+  if (!d.ready) setHintLv('⚠ curl_cffi is missing on the server, so TikTok blocks checks more often. Rebuild the Docker image.');
+}
+function setHintLv(t, err) { $('lvHint').textContent = t || ''; $('lvHint').classList.toggle('err', !!err); }
+function lvTick() {
+  document.querySelectorAll('.lvtime[data-start]').forEach(el => { const s = +el.dataset.start; if (s) el.textContent = fmtDur(Math.max(0, Date.now() / 1000 - LV.skew - s)); });
+}
+async function lvSaved() {
+  const r = await api('/fs/lives');
+  if (!r.success) {
+    LV.saved = null; $('lvSavedSum').textContent = '';
+    LV.html.lvSaved = ''; $('lvSaved').innerHTML = r.locked ? '<div class="lvempty lvlock">🔒 Saved lives are behind the file password. <button class="btn ghost" data-lvunlock="1">Unlock</button></div>' : `<div class="lvempty">${esc(r.message || 'Could not load the saved lives.')}</div>`;
+    return;
+  }
+  LV.saved = r; $('lvSavedSum').textContent = r.count ? `${r.count} · ${r.total_h}${r.hours ? ' · ' + r.hours + ' h' : ''}` : '';
+  lvSavedRender();
+}
+function lvSavedRender() {
+  const r = LV.saved; if (!r) return;
+  const users = [...new Set(r.items.map(x => x.user))];
+  const items = r.items.filter(x => !LV.filter || x.user === LV.filter);
+  const chips = users.length > 1 ? `<div class="lvfilter"><button data-lvf="" class="${LV.filter ? '' : 'on'}">All</button>${users.map(u => `<button data-lvf="${esc(u)}" class="${LV.filter === u ? 'on' : ''}">@${esc(u)}</button>`).join('')}</div>` : '';
+  LV.html.lvSaved = '';
+  $('lvSaved').innerHTML = r.items.length ? chips + `<div class="lvlist">` + items.map(x => `<div class="lvrow">
+      <span class="lvthumb"><img loading="lazy" alt="" src="${xThumb(x)}" onerror="this.remove()"><span>▶</span></span><div class="lvwho"><b>@${esc(x.user)}</b><small>${esc(new Date(x.modified * 1000).toLocaleString(undefined, {dateStyle:'medium', timeStyle:'short'}))}</small></div>
+      <span class="lvdur">${x.duration ? fmtDur(x.duration) : '–'}</span><span class="lvsize">${esc(x.size_h)}</span>
+      <div class="lvctl"><a class="mini" href="${xFileUrl(x)}" target="_blank" rel="noopener">▶ Play</a><a class="mini" href="${xFileUrl(x)}?dl=1" download>⬇</a><button class="mini" data-lvfolder="${esc(x.path.split('/').slice(0, -1).join('/'))}" aria-label="Show in Files">📂</button></div></div>`).join('') + '</div>'
+    : '<div class="lvempty">No saved lives yet.</div>';
+}
+async function lvAddWatch() {
+  const u = lvUser($('lvUser').value); if (!u) return setHintLv('Type a TikTok username, like @name, or paste a tiktok.com/@name/live link.', true);
+  const r = await post('/watches', {kind:'tiktok_live', target:u, interval:+$('lvInt').value});
+  setHintLv(r.success ? `Watching @${u} ✓ - it records by itself when they go live.` : (r.message || 'Could not add'), !r.success);
+  if (r.success) { $('lvUser').value = ''; await api(`/watches/${encodeURIComponent(r.watch.id)}/check`, {method:'POST'}); }
+  lvLoad(); loadWatches();
+}
+async function lvRecord(u) {
+  u = u || lvUser($('lvUser').value); if (!u) return setHintLv('Type a TikTok username first.', true);
+  setHintLv(`Checking if @${u} is live…`);
+  const r = await post('/download-action', {action_type:'url', target:lvLink(u)});
+  if (!r.success) return setHintLv(r.message || 'Could not start.', true);
+  setTracked([...tracked(), r.job_id]); watch();
+  setTimeout(async () => {
+    const j = (await api('/jobs?ids=' + r.job_id)).jobs || [];
+    const job = j[0]; if (job && job.status === 'error') setHintLv(job.message, true); else setHintLv(`🔴 Recording @${u} ✓`);
+    lvLoad();
+  }, 3500);
+}
+
+(function initLivePage() {
+  const pg = $('livePage'); if (!pg) return;
+  safeBind('lvWatchBtn', 'click', lvAddWatch); safeBind('lvRecBtn', 'click', () => lvRecord());
+  $('lvUser').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); lvAddWatch(); } });
+  pg.addEventListener('change', e => { const s = e.target.closest('[data-lvint]'); if (s) { setWInt(s.dataset.lvint, s.value).then(lvLoad); } });
+  pg.addEventListener('click', async e => {
+    const t = e.target.closest('[data-lvmark],[data-lvstop],[data-lvact],[data-lvdel],[data-lvrec],[data-lvunlock],[data-lvfolder],[data-lvf]'); if (!t) return;
+    if (t.dataset.lvmark) { const r = await post(`/live/${encodeURIComponent(t.dataset.lvmark)}/mark`, {}); if (r.success) { toast(`⭐ Moment marked at ${fmtDur(r.t)}`); t.classList.remove('pop'); void t.offsetWidth; t.classList.add('pop'); } else toast(r.message || 'Could not mark'); lvLoad(); return; }
+    if (t.dataset.lvstop) { t.disabled = true; t.textContent = 'Saving…'; await api('/cancel/' + encodeURIComponent(t.dataset.lvstop), {method:'POST'}); toast('Stopping - the recording is being saved'); setTimeout(() => { lvLoad(); lvSaved(); }, 4000); }
+    else if (t.dataset.lvact) { await wact(t.dataset.id, t.dataset.lvact); if (t.dataset.lvact === 'check') toast('Checking now…'); lvLoad(); setTimeout(lvLoad, 4000); }
+    else if (t.dataset.lvdel) { await wdel(t.dataset.lvdel); lvLoad(); }
+    else if (t.dataset.lvrec) lvRecord(t.dataset.lvrec);
+    else if (t.dataset.lvunlock) { if (await xUnlock()) lvSaved(); }
+    else if (t.dataset.lvfolder) { await openFiles(); xGo(t.dataset.lvfolder); }
+    else if (t.dataset.lvf !== undefined) { LV.filter = t.dataset.lvf; lvSavedRender(); }
+  });
+})();

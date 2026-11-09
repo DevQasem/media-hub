@@ -48,7 +48,7 @@ import zlib
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutTimeout
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from flask import Flask, jsonify, redirect, render_template, request, send_file, send_from_directory
 from werkzeug.exceptions import HTTPException
@@ -123,7 +123,7 @@ def load_jobs():
     for j in items if isinstance(items, list) else []:
         if not isinstance(j, dict) or "id" not in j:
             continue
-        if j.get("status") in ("queued", "running"):
+        if j.get("status") in ("queued", "running", "paused"):
             j.update(status="error", message="Server restarted before this finished.",
                      finished=time.time())
         j.setdefault("fresh", [])
@@ -236,6 +236,10 @@ def finish_ok(job, files, message=None, fresh=None):
 
 
 def finish_err(job, msg):
+    if job.get("pausing"):                               # stopped by "Pause", not by a failure: keep it for Resume
+        update(job, status="paused", pausing=False, message="Paused - press Resume to continue", speed="", eta="")
+        save_jobs()
+        return
     update(job, status="error", message=str(msg)[:500], finished=time.time())
     save_jobs()
     _after_finish(job, False)
@@ -470,7 +474,7 @@ DEFAULT_OPTS = {
     "kind": "video",            # video | audio | image (cover/thumbnail as JPG) | gif | sticker
     "quality": "best", "container": "mp4", "compat": False,     # compat = H.264, plays everywhere
     "audio_fmt": "mp3", "abr": "192",
-    "subs": False, "autosubs": False, "sub_langs": "en", "embed_subs": False,
+    "subs": False, "autosubs": False, "sub_langs": "en", "sub_fmt": "srt", "embed_subs": False,
     "thumb": False, "embed_thumb": False, "meta": False, "sponsor": False, "desc": False,
     "playlist": "single", "items": "",                          # single | all, "1-5"
     "clip_start": "", "clip_end": "",                           # "1:30" or seconds
@@ -485,10 +489,10 @@ DEFAULT_OPTS = {
     "fx_rotate": "0", "fx_speed": "1", "fx_crop": "none", "fx_scale": "none",
     "fx_mute": False, "fx_keep": True,                           # fx_keep = keep the original too
 }
-_ENUMS = {"kind": {"video", "audio", "image", "gif", "sticker"},
+_ENUMS = {"kind": {"video", "audio", "image", "gif", "sticker", "subs"},
           "quality": {"best", "2160", "1440", "1080", "720", "480", "360"},
           "container": {"mp4", "mkv", "webm"},
-          "audio_fmt": {"mp3", "m4a", "opus", "flac", "wav"},
+          "audio_fmt": {"mp3", "m4a", "opus", "flac", "wav"}, "sub_fmt": {"srt", "vtt", "ass"},
           "abr": {"96", "128", "192", "256", "320"}, "playlist": {"single", "all"},
           "ig_what": {"posts", "stories", "highlights", "all"},
           "fx_look": {"none", "bw", "sepia", "negative", "vivid", "warm", "cool", "vintage", "cinematic"},
@@ -619,6 +623,77 @@ def has_filters(o):
                                   "min_views", "max_mb", "title_has", "title_not"))
 
 
+# ---- Arroxy-style controls: speed limit, parallel parts, request pacing, retries, filename template ----
+_RATE = {"500K": 500 * 1024, "1M": 1024 ** 2, "2M": 2 * 1024 ** 2, "5M": 5 * 1024 ** 2, "10M": 10 * 1024 ** 2}
+_TPL = {"title": "%(title).120B", "uploader": "%(uploader,channel,creator|Unknown).60B", "id": "%(id)s",
+        "date": "%(upload_date>%Y-%m-%d|unknown-date)s", "resolution": "%(height&{}p|)s", "playlist_index": "%(playlist_index|)s"}
+_TPL_RE = re.compile(r"\{(" + "|".join(_TPL) + r")\}")
+
+
+def clean_template(v):
+    """What the filename box accepts: the known {placeholders}, plain text, '/' for sub-folders - nothing that can leave the folder."""
+    s = str(v or "").strip()[:150]
+    parts = _TPL_RE.split(s)
+    s = "".join("{" + p + "}" if i % 2 else re.sub(r'[\x00-\x1f<>:"\\|?*{}%]', "", p) for i, p in enumerate(parts))
+    segs = [x.strip() for x in s.split("/")]
+    if s.startswith("/") or any(x in ("..", ".") for x in segs):
+        return ""
+    return "/".join(x for x in segs if x)
+
+
+def _to_outtmpl(v):
+    s = clean_template(v)
+    if not s:
+        return None
+    return "".join(_TPL[p] if i % 2 else p for i, p in enumerate(_TPL_RE.split(s))) + ".%(ext)s"
+
+
+def _apply_speed_settings(opts):
+    rate = _RATE.get(str(settings.get("speed_limit", "0")))
+    if rate:
+        opts["ratelimit"] = rate
+    parts = settings.get("parallel_parts", 1)
+    if isinstance(parts, int) and 2 <= parts <= 8:
+        opts["concurrent_fragment_downloads"] = parts
+    pace = settings.get("pace", "off")
+    if pace == "balanced":
+        opts.update(sleep_interval_requests=1, sleep_interval=1, max_sleep_interval=3)
+    elif pace == "careful":
+        opts.update(sleep_interval_requests=2, sleep_interval=3, max_sleep_interval=8)
+    rc = settings.get("retry_count", 3)
+    if isinstance(rc, int) and 0 <= rc <= 10:
+        opts["retries"] = opts["fragment_retries"] = rc
+        if rc:                                              # wait longer before each new attempt (2 s, 4 s, 8 s ... max 30 s)
+            opts["retry_sleep_functions"] = {k: (lambda n: min(2 ** n, 30)) for k in ("http", "fragment", "file_access", "extractor")}
+
+
+_TRACK_PARAM = re.compile(r"^(utm_[a-z_]+|fbclid|gclid|dclid|msclkid|igshid|igsh|si|pp|feature|mc_cid|mc_eid|ref_src|"
+                          r"is_from_webapp|sender_device|sender_web_id|share_app_id|share_item_id|share_link_id|tt_from|u_code)$", re.I)
+
+
+def clean_url(url, _depth=0):
+    """Strip tracking junk (si, pp, utm_*, fbclid, gclid ...) and unwrap youtube.com/redirect links. Anything else is left alone."""
+    try:
+        if not settings.get("clean_urls", True) or not isinstance(url, str):
+            return url
+        u = urlparse(url)
+        if u.scheme not in ("http", "https") or not u.netloc:
+            return url
+        if _depth < 3 and (u.hostname or "").lower() in ("youtube.com", "www.youtube.com", "m.youtube.com") and u.path == "/redirect":
+            q = parse_qs(u.query).get("q", [""])[0]
+            if valid_http_url(q):
+                return clean_url(q, _depth + 1)
+        if not u.query:
+            return url
+        pieces = u.query.split("&")
+        kept = [p for p in pieces if not _TRACK_PARAM.match(p.split("=", 1)[0])]
+        if len(kept) == len(pieces):
+            return url
+        return u._replace(query="&".join(kept)).geturl()
+    except ValueError:
+        return url
+
+
 def build_ydl_opts(options, folder, hook, tmpl=None, cookiefile=None, ig=False, ig_sub="posts"):
     """Translate UI options into a yt-dlp options dict."""
     from yt_dlp.utils import DateRange, download_range_func, match_filter_func
@@ -626,19 +701,24 @@ def build_ydl_opts(options, folder, hook, tmpl=None, cookiefile=None, ig=False, 
     if o["kind"] in ("gif", "sticker"):               # these only need the picture, no subs/tags/etc.
         for k in ("subs", "autosubs", "embed_subs", "thumb", "embed_thumb", "meta", "sponsor", "desc"):
             o[k] = False
+    if o["kind"] == "subs":                           # subtitles only: no video is fetched, so nothing to embed / tag / cut
+        for k in ("embed_subs", "thumb", "embed_thumb", "meta", "sponsor"):
+            o[k] = False
     if tmpl is None:
         who = "%(channel,uploader_id,uploader|Unknown).60B/" if ig else "%(uploader,channel,creator|Unknown).60B/"
         creator = who if settings.get("creator_folders", True) else ""
-        tmpl = creator + "%(title).120B [%(id)s].%(ext)s"
+        nt = None if ig else _to_outtmpl(settings.get("name_template", ""))      # your own file-name template (Settings -> Downloads)
+        tmpl = creator + (nt or "%(title).120B [%(id)s].%(ext)s")
         if ig and settings.get("ig_organize", True):          # instagram/<user>/<post date>/<type>/title [id].ext
             tmpl = who + f"%(upload_date>%Y-%m-%d|unknown-date)s/{ig_sub}/" + "%(title).120B [%(id)s].%(ext)s"
         if o["playlist"] == "all":
-            tmpl = "%(playlist_title|).80B/%(playlist_index|)s %(title).100B [%(id)s].%(ext)s"
+            tmpl = "%(playlist_title|).80B/" + (nt or "%(playlist_index|)s %(title).100B [%(id)s].%(ext)s")
     opts = {"outtmpl": str(folder / tmpl), "quiet": True, "no_warnings": True, "noprogress": True,
             "socket_timeout": 20, "retries": 3, "fragment_retries": 3, "progress_hooks": [hook],
             "noplaylist": o["playlist"] != "all"}
     if cookiefile:
         opts["cookiefile"] = cookiefile
+    _apply_speed_settings(opts)
     pps = []
 
     # --- what to get ---------------------------------------------------------
@@ -648,6 +728,8 @@ def build_ydl_opts(options, folder, hook, tmpl=None, cookiefile=None, ig=False, 
         if o["audio_fmt"] in ("mp3", "m4a", "opus"):
             pp["preferredquality"] = o["abr"]
         pps.append(pp)
+    elif o["kind"] == "subs":
+        opts["skip_download"] = True
     elif o["kind"] in ("gif", "sticker"):
         opts["format"] = "bv*[height<=720]/b[height<=720]/bv*/b"      # video only, small is fine
         opts["merge_output_format"] = "mp4"
@@ -668,15 +750,18 @@ def build_ydl_opts(options, folder, hook, tmpl=None, cookiefile=None, ig=False, 
                 {"key": "ModifyChapters", "remove_sponsor_segments": cats, "remove_chapters_patterns": [],
                  "remove_ranges": [], "sponsorblock_chapter_title": "[SponsorBlock]: %(category_names)l",
                  "force_keyframes": False}]
-    if o["subs"] or o["autosubs"]:
-        opts.update(writesubtitles=o["subs"], writeautomaticsub=o["autosubs"],
+    if o["subs"] or o["autosubs"] or o["kind"] == "subs":
+        embed = o["embed_subs"] and o["kind"] == "video"
+        fmt = "srt" if embed else o["sub_fmt"]                      # embedding needs srt; otherwise your chosen format
+        opts.update(writesubtitles=o["subs"] or o["kind"] == "subs", writeautomaticsub=o["autosubs"],
                     subtitleslangs=[x for x in o["sub_langs"].split(",") if x],
-                    subtitlesformat="srt/best")
-        if o["embed_subs"] and o["kind"] == "video":
-            pps += [{"key": "FFmpegSubtitlesConvertor", "format": "srt"}, {"key": "FFmpegEmbedSubtitle"}]
+                    subtitlesformat=f"{fmt}/best")
+        pps.append({"key": "FFmpegSubtitlesConvertor", "format": fmt})
+        if embed:
+            pps.append({"key": "FFmpegEmbedSubtitle"})
     if o["meta"]:
         pps.append({"key": "FFmpegMetadata", "add_chapters": True, "add_metadata": True})
-    if (o["thumb"] or o["embed_thumb"]) and o["kind"] != "image":
+    if (o["thumb"] or o["embed_thumb"]) and o["kind"] not in ("image", "subs"):
         opts["writethumbnail"] = True
         pps.append({"key": "FFmpegThumbnailsConvertor", "format": "jpg", "when": "before_dl"})
         if o["embed_thumb"]:
@@ -1047,23 +1132,25 @@ def ytdlp_worker(job, url, category, options, cancel):
             main, side = job_files(info, folder)
             files = sorted(set(main) | set(side))
             if not files:
+                if o["kind"] == "subs":
+                    return finish_err(job, "No subtitles found for the languages you chose. Try another language, or tick “Auto-captions”.")
                 return finish_err(job, "No video matched your filters." if has_filters(o)
                                   else "Nothing was saved - the site returned no downloadable media.")
             note = None
             # "real" = this job fetched something (or wrote a cover). Otherwise yt-dlp found it already on disk.
-            real = fetched["n"] > 0 or o["kind"] == "image"
+            real = fetched["n"] > 0 or o["kind"] in ("image", "subs")
             fresh = fresh_since(folder, files, started) if real else []
             if not fresh:
                 note = "Already downloaded - the file is ready (tick “Re-download if it exists” to fetch it again)."
             # effects / GIF / sticker only touch THIS job's own media files
-            targets = main if o["kind"] != "image" else [f for f in side if f.lower().endswith(IMG_EXT)]
+            targets = main if o["kind"] not in ("image", "subs") else ([f for f in side if f.lower().endswith(IMG_EXT)] if o["kind"] == "image" else [])
             others = [f for f in files if f not in targets]
-            out, fxnote = postprocess_media(folder, targets, o, job)
+            out, fxnote = postprocess_media(folder, targets, o, job) if targets else ([], None)
             made_now = set(out) - set(targets)             # files created by the effects step
             files = sorted(set(others) | set(out))
             note = fxnote or note
             fresh_now = (set(fresh) & set(files)) | made_now
-            auto = not o["name"] and settings.get("auto_name", "date") == "date"     # nothing typed: date + number
+            auto = not o["name"] and settings.get("auto_name", "date") == "date" and o["kind"] != "subs"     # nothing typed: date + number (subtitles keep ".en")
             m = rename_files(folder, sorted(set(files) & fresh_now), o, auto)
             if m:
                 files = sorted({m.get(f, f) for f in files}); fresh_now = {m.get(f, f) for f in fresh_now}
@@ -1154,6 +1241,7 @@ def _story_details(snaps):
         prev = urls.get("mediaPreviewUrl")
         prev = prev.get("value") if isinstance(prev, dict) else prev
         media = urls.get("mediaUrl")
+        media = media.get("value") if isinstance(media, dict) else media
         mtype = sn.get("snapMediaType")
         kind = "video" if mtype == 1 else "image" if mtype == 0 else "unknown"
         if not (isinstance(prev, str) and prev.startswith("https://")):
@@ -1161,6 +1249,7 @@ def _story_details(snaps):
         ts = sn.get("timestampInSec")
         ts = ts.get("value") if isinstance(ts, dict) else ts
         out.append({"id": sid, "index": len(out) + 1, "kind": kind, "preview": prev,
+                    "media": media if isinstance(media, str) and media.startswith("https://") else None,   # server side only: used to fetch JUST the picked stories
                     "time": int(ts) if str(ts).isdigit() else None})
     return out
 
@@ -1207,6 +1296,110 @@ def downloaded_ids(ids, names):
     """Which story ids already appear in saved file names (None-safe)."""
     blob = "\n".join(names)
     return {i for i in ids if i in blob}
+
+
+_SNAP_EXT = {"video/mp4": "mp4", "video/quicktime": "mov", "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
+SNAP_MAX_BYTES = 800 * 1024 * 1024
+
+
+def _snap_media_ok(url):
+    """Story files are only fetched from Snapchat's own hosts, over https."""
+    try:
+        u = urlparse(url)
+    except ValueError:
+        return False
+    return u.scheme == "https" and host_is(u.hostname or "", *THUMB_HOSTS)
+
+
+def _snap_fetch_story(dest, story, cancel, tick=None):
+    """Save ONE story from its own media link into dest. Returns the final Path."""
+    url = story["media"]
+    if not _snap_media_ok(url):
+        raise ValueError("the story link is not on a Snapchat host")
+    req = urllib.request.Request(url, headers={"User-Agent": _UA})
+    with urllib.request.urlopen(req, timeout=25) as r:
+        if not _snap_media_ok(r.geturl()):
+            raise ValueError("the story link redirected away from Snapchat")
+        ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if not (ctype.startswith(("video/", "image/")) or ctype == "application/octet-stream"):
+            raise ValueError("that link is not a picture or video")
+        ext = _SNAP_EXT.get(ctype) or {"video": "mp4", "image": "jpg"}.get(story.get("kind"))
+        if not ext:
+            raise ValueError("unknown media type")
+        total = int(r.headers.get("Content-Length") or 0)
+        sid = re.sub(r"[^A-Za-z0-9._=\-]", "_", story["id"])[:120]     # the id stays in the name: that is how already-saved stories are recognised
+        name = f"{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime(story.get('time') or time.time()))}_{sid}.{ext}"
+        final, part, got = dest / name, dest / (name + ".part"), 0
+        try:
+            with open(part, "wb") as f:
+                while True:
+                    if cancel.is_set():
+                        raise DownloadCancelled("Cancelled by user")
+                    chunk = r.read(256 * 1024)
+                    if not chunk:
+                        break
+                    got += len(chunk)
+                    if got > SNAP_MAX_BYTES:
+                        raise ValueError("the file is too large")
+                    f.write(chunk)
+                    if tick and total:
+                        tick(got / total)
+            if got < 512:
+                raise ValueError("the download was empty")
+            os.replace(part, final)
+        finally:
+            part.unlink(missing_ok=True)
+    return final
+
+
+def _snapchat_direct(job, username, cancel, options, picks, folder, done0, log, total_online):
+    """
+    Download ONLY the ticked stories, each straight from its own link. No other story of this user is fetched
+    (the older snapchat-dl route fetches everything in order and deletes the extras afterwards).
+    """
+    dest = user_dir(folder, username) or (folder / username)
+    dest.mkdir(parents=True, exist_ok=True)
+    todo = [p for p in picks if p["id"] not in done0]
+    new, failed = [], []
+    log.append(f"[hub] fetching exactly {len(todo)} picked stories - nothing else is downloaded")
+    for n, st in enumerate(todo, 1):
+        if cancel.is_set():
+            break
+        base = 5 + (n - 1) / len(todo) * 88
+        update(job, message=f"Downloading story {n} of {len(todo)}…", progress=round(base, 1),
+               speed="", eta="")
+        try:
+            p = _snap_fetch_story(dest, st, cancel, lambda fr, b=base, w=88 / len(todo): update(job, progress=round(b + fr * w, 1)))
+            new.append(f"{dest.name}/{p.name}")
+        except DownloadCancelled:
+            break
+        except (OSError, ValueError) as exc:
+            failed.append(st["id"])
+            log.append(f"[hub] story {st['id']} failed: {exc}")
+    update(job, log="\n".join(log[-60:]))
+    if cancel.is_set():
+        return finish_err(job, "Cancelled by user" + (f" - {len(new)} stories had already been saved." if new else ""))
+    if not new:
+        return finish_err(job, "None of the picked stories could be downloaded (they may have just expired). Open the list again.")
+    note = f"Downloaded {len(new)} picked stor{'y' if len(new) == 1 else 'ies'}"
+    if done0:
+        note += f" · {len(done0)} already saved"
+    if failed:
+        note += f" · {len(failed)} could not be fetched"
+    others = total_online - len(picks)
+    if others > 0:
+        note += f" · the other {others} were not touched"
+    o = dict(sanitize_options(options), kind="video")
+    if has_fx(o):
+        update(job, message="Applying effects…", progress=94)
+        new, fxnote = postprocess_media(folder, new, o, job)
+        note += f" · {fxnote}" if fxnote else ""
+    if o["name"]:
+        m = rename_files(folder, new, o)
+        if m:
+            new = sorted({m.get(f, f) for f in new})
+            note += " · saved as " + Path(sorted(m.values())[0]).name
+    return finish_ok(job, new, note, fresh=new)
 
 
 def snapchat_worker(job, username, cancel, options=None, only=None):
@@ -1266,6 +1459,12 @@ def _snapchat_run(job, username, cancel, options=None, only=None):
         log.append(f"[hub] {len(done0)} of {expected} already on disk")
     else:
         update(job, message=f"Fetching stories for @{username}…", progress=5)
+    if only is not None and info:                       # preferred route: fetch ONLY the picked stories from their own links
+        by_id = {s_["id"]: s_ for s_ in (info.get("stories") or [])}
+        picks = [by_id.get(i) for i in ids]
+        if picks and all(p and p.get("media") for p in picks):
+            return _snapchat_direct(job, username, cancel, options, picks, folder, done0, log, total or len(all_ids))
+        log.append("[hub] no direct links for these stories - using snapchat-dl instead")
     hard_limit = min(SNAP_HARD_TIMEOUT, max(300, (total or expected) * 30)) if expected else SNAP_HARD_TIMEOUT
 
     env = {**os.environ, "PYTHONUNBUFFERED": "1", "NO_COLOR": "1"}
@@ -1710,11 +1909,26 @@ def _ig_preview(url, ig):
 @app.route("/preview", methods=["POST"])
 def preview():
     """Title + thumbnail without downloading (time-limited)."""
-    url = str(json_body().get("url") or "").strip()
+    url = clean_url(str(json_body().get("url") or "").strip())
     if not url:
         return jsonify(success=False, error="No URL provided"), 400
     if not valid_http_url(url):
         return jsonify(success=False, error="That doesn't look like a valid link."), 400
+
+    lu = live_user_from(url)
+    if lu:                                                       # TikTok LIVE link: say whether they are live now
+        try:
+            st = preview_pool.submit(tt_live_status, lu).result(timeout=PREVIEW_TIMEOUT)
+        except FutTimeout:
+            return jsonify(success=False, error="TikTok did not answer in time - try again."), 504
+        except LiveError as exc:
+            return jsonify(success=False, error=str(exc)), 502
+        with live_lock:
+            rec = live_now.get(lu.lower())
+        return jsonify(success=True, title=(st["title"] or f"@{lu}'s LIVE") if st["live"] else f"@{lu} is not live right now",
+                       thumbnail=st["cover"] if st["live"] else "", uploader="@" + lu, duration=None, views=None,
+                       upload_date=None, site="TikTok LIVE", category="tiktok", channel_url="",
+                       live={"user": lu, "is_live": st["live"], "recording": rec})
 
     # --- TikTok: share links -> real address; photo posts are not videos, so yt-dlp cannot read them (the download handles them) ---
     tiktok = detect_category(url) == "tiktok"
@@ -1740,7 +1954,7 @@ def preview():
                        thumbnail=info.get("thumbnail", ""),
                        uploader=info.get("uploader") or info.get("channel") or "",
                        duration=info.get("duration"), views=info.get("view_count"),
-                       upload_date=info.get("upload_date"),
+                       upload_date=info.get("upload_date"), quality=_quality_summary(info),
                        site=info.get("extractor_key", ""), category=detect_category(url),
                        channel_url="" if igx else (info.get("channel_url") or info.get("uploader_url") or ""),
                        **extra)
@@ -1758,6 +1972,77 @@ def preview():
                 return jsonify(success=True, title="TikTok link", thumbnail="", uploader="", duration=None, views=None, upload_date=None,
                                site="TikTok", category="tiktok", channel_url="")
         return jsonify(success=False, error=msg[:300])
+
+
+def _quality_summary(info):
+    """Best picture this link offers: {height, fps, hdr} (shown as '4K · 60 fps · HDR' on the preview card)."""
+    try:
+        fm = [f for f in (info.get("formats") or []) if isinstance(f, dict) and f.get("vcodec") not in (None, "none")]
+        hs = [f["height"] for f in fm if isinstance(f.get("height"), int)]
+        if not hs:
+            return None
+        top = max(hs)
+        fps = max([f.get("fps") or 0 for f in fm if f.get("height") == top] or [0])
+        return {"height": top, "fps": int(round(fps)),
+                "hdr": any(str(f.get("dynamic_range") or "").upper().startswith("HDR") for f in fm)}
+    except Exception:  # noqa: BLE001 - a missing badge is better than a failed preview
+        return None
+
+
+PL_CACHE = {}
+_CHANNEL_RE = re.compile(r"^(https?://(?:www\.|m\.)?youtube\.com/(?:@[\w.\-]+|channel/[\w\-]+|c/[\w\-]+|user/[\w\-]+))/?$", re.I)
+
+
+def fetch_playlist(url, limit=300):
+    """The videos of a playlist / channel / profile WITHOUT downloading anything (fast 'flat' listing)."""
+    m = _CHANNEL_RE.match(url)
+    if m:
+        url = m.group(1) + "/videos"                    # a bare channel link lists its tabs; we want the videos
+    with cookie_ctx(False) as cf:
+        opts = {"skip_download": True, "quiet": True, "no_warnings": True, "socket_timeout": 20,
+                "extract_flat": "in_playlist", "playlistend": limit, "noplaylist": False}
+        if cf:
+            opts["cookiefile"] = cf
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    entries = []
+    for e in (info.get("entries") or []):
+        if not isinstance(e, dict):
+            continue
+        u = e.get("url") or e.get("webpage_url")
+        if isinstance(u, str) and not u.startswith("http") and str(e.get("ie_key") or "").lower() == "youtube" and e.get("id"):
+            u = f"https://www.youtube.com/watch?v={e['id']}"
+        if not isinstance(u, str) or not valid_http_url(u):
+            continue
+        th = e.get("thumbnail") or next((t.get("url") for t in reversed(e.get("thumbnails") or []) if isinstance(t, dict) and t.get("url")), None)
+        entries.append({"index": len(entries) + 1, "id": str(e.get("id") or len(entries) + 1)[:60],
+                        "title": str(e.get("title") or f"Video {len(entries) + 1}")[:160], "duration": e.get("duration"),
+                        "url": u, "thumb": th if isinstance(th, str) and th.startswith("https://") else ""})
+    return {"title": str(info.get("title") or "Playlist")[:120], "uploader": str(info.get("uploader") or info.get("channel") or "")[:80],
+            "total": info.get("playlist_count"), "entries": entries}
+
+
+@app.route("/playlist-info", methods=["POST"])
+def playlist_info():
+    """List a playlist / channel for the 'Choose videos' picker."""
+    url = clean_url(str(json_body().get("url") or "").strip())
+    if not valid_http_url(url):
+        return jsonify(success=False, error="That doesn't look like a valid link."), 400
+    hit = PL_CACHE.get(url)
+    if hit and time.time() - hit[0] < 600:
+        return jsonify(success=True, **hit[1])
+    try:
+        data = preview_pool.submit(fetch_playlist, url).result(timeout=70)
+    except FutTimeout:
+        return jsonify(success=False, error="Reading the list took too long. Try again, or download without choosing."), 504
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(success=False, error=last_line(exc, "Could not read this list")[:300])
+    if len(data["entries"]) < 1:
+        return jsonify(success=False, error="No videos were found in this link.")
+    if len(PL_CACHE) > 30:
+        PL_CACHE.clear()
+    PL_CACHE[url] = (time.time(), data)
+    return jsonify(success=True, **data)
 
 
 @app.route("/snap-info")
@@ -1876,8 +2161,12 @@ def enqueue(action, target, quality="best", batch=None, options=None, only=None)
         fn, args, category = snapchat_worker, (username, cancel, options, picked), "snapchat"
         label = f"@{username}" + (f" · {len(picked)} picked" if picked else "")
     elif action == "url":
+        target = clean_url(target)
         if not valid_http_url(target):
             return None, "Please enter a valid http(s) link."
+        lu = live_user_from(target)
+        if lu:                                                   # a TikTok LIVE link: record it now, outside the queue
+            return start_live(lu)
         category = detect_category(target)
         opts = sanitize_options(options if options else {"quality": quality})
         fn, args, label = ytdlp_worker, (target, category, opts, cancel), target
@@ -1895,7 +2184,7 @@ def enqueue(action, target, quality="best", batch=None, options=None, only=None)
            "finished": None, "batch": batch}
     with lock:
         jobs[job["id"]], cancels[job["id"]] = job, cancel
-    pool.submit(_run_safely, fn, job, *args)
+    queue_add(job, fn, args)
     return job, None
 
 
@@ -1947,6 +2236,564 @@ def _run_safely(fn, job, *args):
         finish_err(job, f"Unexpected error: {exc}")
     if job["status"] in ("queued", "running"):          # a worker returned without finishing: never leave it hanging
         finish_err(job, "The download ended without a result.")
+
+
+# ---- download queue: MAX_WORKERS run at once, the rest wait in an order you can change ----
+# A queued job can be moved or held; a running job can be paused (stopped now, resumed later -
+# yt-dlp continues its .part file and Snapchat/Instagram skip what is already saved).
+qcond = threading.Condition()
+pending = []                 # job ids waiting, in the order they will start
+tasks = {}                   # job id -> (worker fn, args) - kept until the job really ends, so Resume can rerun it
+
+
+def queue_add(job, fn, args, front=False):
+    with qcond:
+        tasks[job["id"]] = (fn, args)
+        if job["id"] not in pending:
+            pending.insert(0, job["id"]) if front else pending.append(job["id"])
+        qcond.notify()
+
+
+def _queue_worker():
+    while True:
+        with qcond:
+            while True:
+                with lock:
+                    jid = next((i for i in pending if (jobs.get(i) or {}).get("status") == "queued"), None)
+                if jid:
+                    pending.remove(jid)
+                    fn, args = tasks.get(jid, (None, ()))
+                    break
+                qcond.wait(timeout=30)
+        job = jobs.get(jid)
+        if not job or fn is None:
+            continue
+        _run_safely(fn, job, *args)
+        if job.get("status") != "paused":
+            with qcond:
+                tasks.pop(jid, None)
+
+
+for _n in range(MAX_WORKERS):
+    threading.Thread(target=_queue_worker, daemon=True, name=f"dlq{_n}").start()
+
+
+def queue_view(ids):
+    """The jobs you know about (by id), with their place in the line."""
+    with qcond, lock:
+        order = {jid: n + 1 for n, jid in enumerate(i for i in pending if (jobs.get(i) or {}).get("status") in ("queued", "paused"))}
+        out = []
+        for i in ids:
+            j = jobs.get(i)
+            if j and j["status"] in ("queued", "running", "paused"):
+                out.append(dict(j, position=order.get(i), can_pause=i in tasks))
+    rank = {"running": 0, "queued": 1, "paused": 2}
+    return sorted(out, key=lambda j: (rank[j["status"]], j.get("position") or 0, j["created"]))
+
+
+@app.route("/queue")
+def queue_list():
+    ids = [i for i in (request.args.get("ids") or "").split(",") if i][:200]
+    return jsonify(success=True, jobs=queue_view(ids), slots=MAX_WORKERS)
+
+
+@app.route("/queue/<job_id>/<action>", methods=["POST"])
+def queue_action(job_id, action):
+    with lock:
+        job = jobs.get(job_id)
+    if not job or action not in ("pause", "resume", "up", "down", "top", "cancel"):
+        return jsonify(success=False, message="Not found."), 404
+    st = job["status"]
+    if action == "cancel":
+        if st in ("queued", "paused"):                       # not running: end it now instead of waiting for a free slot
+            with qcond:
+                if job_id in pending:
+                    pending.remove(job_id)
+                tasks.pop(job_id, None)
+            update(job, pausing=False)
+            finish_err(job, "Cancelled by user")
+        else:
+            ev = cancels.get(job_id)
+            ev and ev.set()
+        return jsonify(success=True)
+    if action == "pause":
+        if st == "queued":
+            update(job, status="paused", message="On hold - press Resume to put it back in line")
+        elif st == "running":
+            if job_id not in tasks:
+                return jsonify(success=False, message="This kind of job cannot be paused - cancel it instead."), 400
+            update(job, pausing=True, message="Pausing…")
+            ev = cancels.get(job_id)
+            ev and ev.set()
+        save_jobs()
+        return jsonify(success=True)
+    if action == "resume":
+        if st != "paused":
+            return jsonify(success=False, message="It is not paused."), 400
+        ev = cancels.get(job_id)
+        ev and ev.clear()
+        update(job, status="queued", message="Waiting in queue…")
+        with qcond:
+            if job_id not in pending:
+                pending.append(job_id)
+            qcond.notify()
+        save_jobs()
+        return jsonify(success=True)
+    with qcond:                                              # up / down / top: only among the jobs still waiting
+        if job_id not in pending:
+            return jsonify(success=False, message="Only waiting downloads can be moved."), 400
+        i = pending.index(job_id)
+        pending.pop(i)
+        j = 0 if action == "top" else max(0, i - 1) if action == "up" else min(len(pending), i + 1)
+        pending.insert(j, job_id)
+    return jsonify(success=True)
+
+
+# --------------------------------------------------------------------------- #
+# TikTok LIVE recording
+# Method adapted from Michele0303/tiktok-live-recorder (MIT License, (c) 2023 Michele):
+# username -> room id -> "is it live?" -> best FLV/HLS stream URL -> save the raw stream -> remux to MP4.
+# --------------------------------------------------------------------------- #
+try:
+    from curl_cffi import requests as _cffi            # looks like a real browser to TikTok (also used by yt-dlp)
+except ImportError:                                     # still works without it, but TikTok blocks plain clients more often
+    _cffi = None
+
+TT_WEB, TT_CAST, TT_HELPER = "https://www.tiktok.com", "https://webcast.tiktok.com", "https://tikrec.com"
+TT_LIVE_RE = re.compile(r"^https?://(?:www\.|m\.)?tiktok\.com/@([A-Za-z0-9._-]{2,24})/live\b", re.I)
+TT_USER_RE = re.compile(r"^[A-Za-z0-9._-]{2,24}$")
+TT_HEADERS = {"Accept-Language": "en-US", "Referer": "https://www.tiktok.com/", "Origin": "https://www.tiktok.com",
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/136.0.0.0 Safari/537.36"}
+LIVE_INTERVALS = (2, 5, 10)                             # live watches can check more often than post watches
+LIVE_MIN_FREE = 2 * 1024 ** 3                           # stop a recording before the disk is full
+live_now = {}                                           # lower-case username -> job id of the running recording
+live_lock = threading.Lock()
+_tt_local = threading.local()
+
+
+class LiveError(Exception):
+    pass
+
+
+def _tt_session():
+    s = getattr(_tt_local, "s", None)
+    if s is None and _cffi is not None:
+        s = _tt_local.s = _cffi.Session(impersonate="chrome136")
+        s.headers.update(TT_HEADERS)
+    return s
+
+
+def _tt_json(url, params=None, timeout=15):
+    """GET a TikTok JSON endpoint; returns {} when TikTok answers with its 'please wait' wall or anything not JSON."""
+    if params:
+        url += ("&" if "?" in url else "?") + "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
+    try:
+        s = _tt_session()
+        if s is not None:
+            text = s.get(url, timeout=timeout).text
+        else:
+            req = urllib.request.Request(url, headers=TT_HEADERS)
+            text = urllib.request.urlopen(req, timeout=timeout).read(4 * 1024 * 1024).decode("utf-8", "replace")
+    except Exception as exc:  # noqa: BLE001
+        raise LiveError(f"Could not reach TikTok: {exc}") from exc
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _tt_room_direct(user):
+    for attempt in range(3):                             # TikTok sometimes answers with its "please wait" wall: try again
+        d = _tt_json(f"{TT_WEB}/api-live/user/room/", {"aid": 1988, "sourceType": 54, "uniqueId": user})
+        if d:
+            break
+        time.sleep(1.5 * (attempt + 1))
+    data = d.get("data") or {}
+    u, lr = data.get("user") or {}, data.get("liveRoom") or {}
+    if not u and d.get("statusCode") not in (None, 0):
+        raise LiveError("TikTok account not found." if d.get("statusCode") == 19881007 else "TikTok refused the lookup.")
+    return u.get("roomId") or "", lr.get("title") or "", (lr.get("coverUrl") or u.get("avatarLarger") or "")
+
+
+def _tt_room_helper(user):
+    """Fallback used by Michele0303's recorder: tikrec.com signs the lookup URL. It sees the username - can be switched off."""
+    try:
+        signed = _tt_json(f"{TT_HELPER}/tiktok/room/api/sign", {"unique_id": user}).get("signed_path")
+    except LiveError:
+        signed = None
+    if not signed or not str(signed).startswith("/"):
+        return ""
+    d = _tt_json(TT_WEB + signed)
+    return str(((d.get("data") or {}).get("user") or {}).get("roomId") or "")
+
+
+def tt_room(user):
+    """(room_id, title, cover) for a username. room_id is '' when TikTok gives none."""
+    rid, title, cover = "", "", ""
+    try:
+        rid, title, cover = _tt_room_direct(user)
+    except LiveError as exc:
+        if "not found" in str(exc) or not settings.get("live_helper", True):
+            raise                                        # a missing account is final - never ask the helper about it
+    if not rid and settings.get("live_helper", True):
+        rid = _tt_room_helper(user)
+    return str(rid or ""), title, cover
+
+
+def tt_room_info(rid):
+    return _tt_json(f"{TT_CAST}/webcast/room/info/", {"aid": 1988, "room_id": rid})
+
+
+def tt_is_live(rid):
+    if not rid:
+        return False
+    alive = _tt_json(f"{TT_CAST}/webcast/room/check_alive/", {"aid": 1988, "region": "CH", "room_ids": rid, "user_is_login": "true"})
+    lst = alive.get("data")
+    if not (isinstance(lst, list) and lst and isinstance(lst[0], dict) and lst[0].get("alive")):
+        return False
+    info = tt_room_info(rid)
+    if info.get("status_code") == 4003110:               # live but restricted for anonymous viewers: still try
+        return True
+    room = info.get("data") or {}
+    return info.get("status_code", 0) == 0 and str(room.get("status", 2)) == "2"
+
+
+LIVE_QUALITY_ORDER = {"best": ("origin", "uhd", "hd", "sd", "ld"), "hd": ("hd", "uhd", "origin", "sd", "ld"),
+                      "sd": ("sd", "ld", "hd", "uhd", "origin")}
+
+
+def _quality_label(key, main, names):
+    try:
+        p = json.loads(main.get("sdk_params") or "{}")
+    except ValueError:
+        p = {}
+    res = str(p.get("resolution") or "")
+    h = min((int(x) for x in res.split("x") if x.isdigit()), default=0)
+    name = names.get(key) or {"origin": "Original", "uhd": "Ultra HD", "hd": "HD", "sd": "SD", "ld": "Low"}.get(key, key)
+    return f"{name} · {h}p" if h else name
+
+
+def tt_streams(rid):
+    """[(url, quality label)] - the quality you chose first (Original by default), FLV before HLS like the original recorder."""
+    info = tt_room_info(rid)
+    if "This account is private" in json.dumps(info)[:20000]:
+        raise LiveError("This account is private.")
+    if info.get("status_code") == 4003110:
+        raise LiveError("TikTok only shows this live to logged-in or following viewers.")
+    room = info.get("data") or {}
+    su = room.get("stream_url") or {}
+    out = []
+    add = lambda u, lab="": u and isinstance(u, str) and all(u != x for x, _ in out) and out.append((u, lab))
+    sdk = (su.get("live_core_sdk_data") or {}).get("pull_data") or {}
+    try:
+        streams = json.loads(sdk.get("stream_data") or "{}").get("data") or {}
+    except ValueError:
+        streams = {}
+    quals = [q for q in (sdk.get("options") or {}).get("qualities") or [] if isinstance(q, dict)]
+    level = {q.get("sdk_key"): q.get("level", -1) for q in quals}
+    names = {q.get("sdk_key"): str(q.get("name") or "") for q in quals if q.get("name")}
+    pref = LIVE_QUALITY_ORDER.get(settings.get("live_quality", "best"), LIVE_QUALITY_ORDER["best"])
+    rank = lambda k: (pref.index(k) if k in pref else len(pref), -level.get(k, -1))
+    for key in sorted(streams, key=rank):
+        main = (streams[key] or {}).get("main") or {}
+        lab = _quality_label(key, main, names)
+        add(main.get("flv"), lab)
+        add(main.get("hls") or main.get("m3u8"), lab)
+    flv = su.get("flv_pull_url") or {}
+    for key, lab in (("FULL_HD1", "Full HD"), ("HD1", "HD"), ("SD2", "SD"), ("SD1", "SD")):
+        add(flv.get(key), lab)
+    add(su.get("hls_pull_url"), "HLS")
+    return out
+
+
+def tt_stream_urls(rid):
+    return [u for u, _l in tt_streams(rid)]
+
+
+def tt_live_status(user):
+    """What the page and the watchlist need: {'user', 'room_id', 'live', 'title', 'cover'}."""
+    rid, title, cover = tt_room(user)
+    return {"user": user, "room_id": rid, "live": tt_is_live(rid), "title": title, "cover": cover}
+
+
+def _stream_to_file(url, fh, job, cancel, started, deadline):
+    """Copy one stream URL into the open file until it ends, we are stopped, time is up or the disk is nearly full.
+    Returns (bytes written, reason)."""
+    req = urllib.request.Request(url, headers=TT_HEADERS)
+    n, tick = 0, 0.0
+    with urllib.request.urlopen(req, timeout=20) as r:
+        while True:
+            if cancel.is_set():
+                return n, "stopped"
+            if time.time() >= deadline:
+                return n, "time"
+            chunk = r.read(256 * 1024)
+            if not chunk:
+                return n, "ended"
+            fh.write(chunk)
+            n += len(chunk)
+            now = time.time()
+            if now - tick > 2:
+                tick = now
+                if now - job.get("stats_t", 0) > 45:              # viewers + title, at most once every 45 s
+                    job["stats_t"] = now
+                    threading.Thread(target=_live_stats, args=(job,), daemon=True).start()
+                if shutil.disk_usage(BASE_DIR).free < LIVE_MIN_FREE:
+                    return n, "disk"
+                size = fh.tell()
+                el = int(now - started)
+                update(job, message=f"🔴 Recording · {el // 3600}:{el // 60 % 60:02d}:{el % 60:02d} · {human(size)}",
+                       speed=human(size / max(1, now - started)) + "/s", rec_size=size, rec_secs=el)
+
+
+def _live_stats(job):
+    try:
+        room = tt_room_info(job.get("room_id") or "").get("data") or {}
+    except Exception:  # noqa: BLE001
+        return
+    n = room.get("user_count")
+    if isinstance(n, int):
+        update(job, viewers=n, peak=max(n, job.get("peak") or 0))
+    if room.get("title"):
+        update(job, live_title=str(room["title"])[:200])
+
+
+def el_now(started):
+    return int(time.time() - started)
+
+
+def tiktok_live_worker(job, user, cancel):
+    """Record one TikTok LIVE until it ends or you press Stop - stopping always SAVES what was recorded."""
+    update(job, status="running", message=f"Looking for @{user}'s live…", progress=0)
+    try:
+        st = tt_live_status(user)
+    except LiveError as exc:
+        return finish_err(job, str(exc))
+    if not st["room_id"]:
+        return finish_err(job, f"Could not find @{user}'s live room (TikTok may be blocking the check - try again in a minute).")
+    if not st["live"]:
+        return finish_err(job, f"@{user} is not live right now.")
+    _need_ffmpeg()
+    folder = BASE_DIR / "tiktok"
+    out_dir = folder / user / "lives"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"{user} live {time.strftime('%Y-%m-%d %H-%M')}"
+    raw = out_dir / f"{stem}.flv.part"
+    started = time.time()
+    deadline = started + float(settings.get("live_max_hours", 6)) * 3600
+    update(job, live=True, rec_started=started, label=f"🔴 @{user} LIVE", message="🔴 Recording…",
+           live_user=user, room_id=st["room_id"], live_title=st["title"], viewers=None, peak=0, cover=st["cover"], marks=[])
+    reason, fails, total, errmsg = "ended", 0, 0, ""
+    with open(raw, "ab") as fh:
+        while True:
+            try:
+                urls = tt_streams(st["room_id"])
+            except LiveError as exc:
+                errmsg = str(exc)
+                break
+            got = 0
+            for item in urls:
+                url, qlab = item if isinstance(item, tuple) else (item, "")
+                if qlab and job.get("quality") != qlab:
+                    update(job, quality=qlab)
+                try:
+                    n, reason = _stream_to_file(url, fh, job, cancel, started, deadline)
+                except Exception as exc:  # noqa: BLE001   a dropped connection: try the next URL / reconnect below
+                    n, reason = 0, f"network: {exc}"
+                got += n
+                if n >= 4096 or reason in ("stopped", "time", "disk"):
+                    break
+            total += got
+            fh.flush()
+            if reason in ("stopped", "time", "disk"):
+                break
+            fails = 0 if got else fails + 1
+            if fails >= 6 or not tt_is_live(st["room_id"]):      # the live is over (or TikTok keeps refusing)
+                break
+            if cancel.wait(2):
+                reason = "stopped"
+                break
+    if total < 4096:
+        raw.unlink(missing_ok=True)
+        return finish_err(job, errmsg or "Could not record anything - TikTok gave no working stream for this live.")
+    update(job, message="Saving the recording…", speed="")
+    marks = sorted(m["t"] for m in job.get("marks") or [] if 0 < m["t"] < el_now(started))
+    meta_in, meta_map, metafile = [], [], None
+    if marks:                                            # your ⭐ moments become chapters you can jump to in any player
+        pts = [0] + marks + [int(el_now(started))]
+        notes = {m["t"]: m.get("note") for m in job.get("marks") or []}
+        lines = [";FFMETADATA1"]
+        for i in range(len(pts) - 1):
+            title = "Start" if i == 0 else (notes.get(pts[i]) or f"⭐ Moment {i}")
+            lines += ["[CHAPTER]", "TIMEBASE=1/1000", f"START={pts[i] * 1000}", f"END={max(pts[i] + 1, pts[i + 1]) * 1000}",
+                      "title=" + re.sub(r"[=;#\\\n]", " ", str(title))[:80]]
+        metafile = out_dir / f".{stem}.chapters.txt"
+        metafile.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        meta_in, meta_map = ["-i", str(metafile)], ["-map_chapters", "1"]
+    mp4 = out_dir / f"{stem}.mp4"
+    k = 2
+    while mp4.exists():
+        mp4, k = out_dir / f"{stem} ({k}).mp4", k + 1
+    try:
+        hevc = _vcodec(raw) in ("hevc", "h265")
+        _ffmpeg(["ffmpeg", "-y", "-v", "error", "-f", "flv", "-i", str(raw), *meta_in, "-map", "0", *meta_map, "-c", "copy",
+                 *(["-tag:v", "hvc1"] if hevc else []), "-movflags", "+faststart", str(mp4)], timeout=3 * 3600)
+        raw.unlink(missing_ok=True)
+        saved = mp4
+    except Exception:  # noqa: BLE001   could not convert: keep the raw recording rather than lose it
+        app.logger.exception("Live remux failed for @%s", user)
+        saved = raw.with_name(f"{stem}.flv")
+        raw.replace(saved)
+    if metafile is not None:
+        metafile.unlink(missing_ok=True)
+    fs_dirty()
+    el = int(time.time() - started)
+    moments = f" · {len(marks)} ⭐ moment{'s' if len(marks) != 1 else ''}" if marks else ""
+    why = {"stopped": "you stopped it", "time": "time limit reached", "disk": "the disk is almost full"}.get(reason, "the live ended")
+    rel = saved.relative_to(folder).as_posix()
+    took = f"{el // 3600}h {el // 60 % 60:02d}m" if el >= 3600 else f"{el // 60}m {el % 60:02d}s"
+    finish_ok(job, [rel], message=f"Saved {took} of @{user}'s live ({human(saved.stat().st_size)}){moments} - {why}.")
+    return None
+
+
+def start_live(user, silent=False):
+    """Start recording @user now (in its own thread - a live cannot wait in the download queue). Returns (job, error)."""
+    key = user.lower()
+    with live_lock:
+        jid = live_now.get(key)
+        if jid and (jobs.get(jid) or {}).get("status") in ("queued", "running"):
+            return jobs[jid], None                         # already recording: hand back the same job
+        job = {"id": uuid.uuid4().hex[:12], "category": "tiktok", "label": f"🔴 @{user} LIVE", "status": "queued",
+               "progress": 0, "message": "Starting…", "speed": "", "eta": "", "files": [], "fresh": [], "created": time.time(),
+               "finished": None, "batch": None, "silent": silent, "live": True}
+        cancel = threading.Event()
+        with lock:
+            jobs[job["id"]], cancels[job["id"]] = job, cancel
+        live_now[key] = job["id"]
+    with wlock:                                           # remember when they go live -> "usually live around …"
+        for w in watches.values():
+            if w["kind"] == "tiktok_live" and w["target"].lower() == key:
+                w["live_starts"] = (w.get("live_starts") or [])[-39:] + [int(time.time())]
+                _save(WATCH_FILE, watches)
+
+    def run():
+        try:
+            _run_safely(tiktok_live_worker, job, user, cancel)
+        finally:
+            with live_lock:
+                if live_now.get(key) == job["id"]:
+                    live_now.pop(key, None)
+        if silent and job["status"] == "done":                 # started by the watchlist: say it was saved
+            notify(f"⏺ Saved @{user}'s live", str(job.get("message") or "")[:200], ["movie_camera"])
+    threading.Thread(target=run, daemon=True, name=f"live-{key}").start()
+    return job, None
+
+
+def live_user_from(target):
+    m = TT_LIVE_RE.match(target or "")
+    return m.group(1) if m else None
+
+
+def _live_rec_view(j):
+    return {"id": j["id"], "user": j.get("live_user") or "", "title": j.get("live_title") or "", "started": j.get("rec_started"),
+            "secs": j.get("rec_secs", 0), "size": j.get("rec_size", 0), "size_h": human(j.get("rec_size", 0)),
+            "speed": j.get("speed", ""), "viewers": j.get("viewers"), "peak": j.get("peak") or 0,
+            "status": j["status"], "message": j.get("message", ""), "cover": j.get("cover") or "",
+            "quality": j.get("quality") or "", "marks": len(j.get("marks") or [])}
+
+
+def live_habit(starts):
+    """'Usually live around 21:00 · Fri, Sat' once we have seen 3+ lives (server's local time)."""
+    if len(starts or []) < 3:
+        return ""
+    lt = [time.localtime(t) for t in starts]
+    hours = [0] * 24
+    for t in lt:
+        for d, wgt in ((-1, 1), (0, 2), (1, 1)):          # smooth: 20:55 and 21:05 count as the same habit
+            hours[(t.tm_hour + d) % 24] += wgt
+    h = max(range(24), key=lambda i: hours[i])
+    days = {}
+    for t in lt:
+        days[t.tm_wday] = days.get(t.tm_wday, 0) + 1
+    top = [d for d, n in sorted(days.items(), key=lambda x: -x[1]) if n >= 2][:3]
+    names = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+    return f"Usually live around {h:02d}:00" + (" · " + ", ".join(names[d] for d in sorted(top)) if top else "")
+
+
+@app.route("/live/overview")
+def live_overview():
+    """Everything the Live page shows except the saved files (those need the file password: /fs/lives)."""
+    with live_lock:
+        ids = list(live_now.values())
+    with lock:
+        recs = [_live_rec_view(jobs[i]) for i in ids if i in jobs and jobs[i]["status"] in ("queued", "running")]
+    by_user = {r["user"].lower(): r for r in recs}
+    with wlock:
+        ws = [dict(w) for w in watches.values() if w["kind"] == "tiktok_live"]
+    accounts = [{"id": w["id"], "user": w["target"], "enabled": w["enabled"], "interval": w.get("interval", 5),
+                 "last_check": w.get("last_check"), "next_check": w.get("next_check"), "busy": w.get("busy", False),
+                 "last_status": w.get("last_status", ""), "total": w.get("total_new", 0),
+                 "recording": by_user.get(w["target"].lower()), "habit": live_habit(w.get("live_starts")),
+                 "lives_seen": len(w.get("live_starts") or [])} for w in sorted(ws, key=lambda w: w["created"])]
+    return jsonify(success=True, accounts=accounts, recording=recs, intervals=LIVE_INTERVALS + INTERVALS[:2],
+                   quality=settings.get("live_quality", "best"),
+                   helper=settings.get("live_helper", True), max_hours=settings.get("live_max_hours", 6),
+                   ready=_cffi is not None, now=time.time())
+
+
+@app.route("/live/<job_id>/mark", methods=["POST"])
+def live_mark(job_id):
+    """⭐ Mark this moment of a running recording - it becomes a chapter in the saved MP4."""
+    with lock:
+        j = jobs.get(job_id)
+        if not j or not j.get("live") or j["status"] != "running" or not j.get("rec_started"):
+            return jsonify(success=False, message="That recording is not running."), 404
+        if len(j.setdefault("marks", [])) >= 200:
+            return jsonify(success=False, message="That is a lot of moments - 200 is the limit."), 400
+        t = int(time.time() - j["rec_started"])
+        note = re.sub(r"\s+", " ", str(json_body().get("note") or "")).strip()[:80]
+        j["marks"].append({"t": t, "note": note})
+        n = len(j["marks"])
+    return jsonify(success=True, t=t, count=n)
+
+
+@app.route("/fs/lives")
+def fs_lives():
+    """Saved live recordings, newest first (needs the file password like the rest of /fs/)."""
+    root, out = BASE_DIR / "tiktok", []
+    if root.is_dir():
+        for f in root.glob("*/lives/*"):
+            if not f.is_file() or is_partial(f.name) or f.suffix.lower() not in (".mp4", ".flv"):
+                continue
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            rel = fs_rel(f)
+            with mlock:
+                dur = (media_meta.get(rel) or {}).get("d") or 0
+            out.append({"path": rel, "user": f.parent.parent.name, "name": f.name, "size": st.st_size, "size_h": human(st.st_size),
+                        "modified": st.st_mtime, "duration": dur})
+    out.sort(key=lambda x: -x["modified"])
+    total = sum(x["size"] for x in out)
+    return jsonify(success=True, items=out[:300], count=len(out), total_h=human(total),
+                   hours=round(sum(x["duration"] for x in out) / 3600, 1))
+
+
+@app.route("/live/status")
+def live_status_api():
+    user = (request.args.get("user") or "").lstrip("@")
+    if not TT_USER_RE.match(user):
+        return jsonify(success=False, message="Enter a TikTok username."), 400
+    try:
+        st = tt_live_status(user)
+    except LiveError as exc:
+        return jsonify(success=False, message=str(exc)), 502
+    with live_lock:
+        st["recording"] = live_now.get(user.lower())
+    return jsonify(success=True, **st)
 
 
 @app.route("/job/<job_id>")
@@ -2276,12 +3123,45 @@ def channel_worker(job, w, cancel):
     finish_ok(job, files, fxnote or (f"{len(files)} new video(s)" if files else "Nothing new"), fresh=files)
 
 
+def run_live_watch(w):
+    """A TikTok LIVE watch: a quick 'are they live?' check; when they are, recording starts by itself."""
+    user, status, started = w["target"], "", False
+    try:
+        with live_lock:
+            jid = live_now.get(user.lower())
+        if jid and (jobs.get(jid) or {}).get("status") in ("queued", "running"):
+            status = "🔴 Recording now"
+        elif tt_live_status(user)["live"]:
+            start_live(user, silent=True)
+            started, status = True, "🔴 Went live - recording"
+        else:
+            status = "Not live"
+    except LiveError as exc:
+        status = "⚠️ " + str(exc)[:200]
+    except Exception:  # noqa: BLE001
+        app.logger.exception("Live check crashed for @%s", user)
+        status = "⚠️ The live check failed - it will try again."
+    finally:
+        with wlock:
+            w["busy"] = False
+            w["last_check"] = time.time()
+            w["next_check"] = time.time() + w.get("interval", 5) * 60
+            w["last_status"] = status
+            w["last_new"] = 1 if started else 0
+            w["total_new"] = w.get("total_new", 0) + (1 if started else 0)
+            _save(WATCH_FILE, watches)
+    if started:
+        notify(f"🔴 @{user} is live", "Media Hub started recording it.", ["red_circle"])
+
+
 def run_watch(wid):
     """One scheduled check of one watched account (runs in the thread pool). Never leaves a watch 'busy'."""
     with wlock:
         w = watches.get(wid)
     if not w:
         return
+    if w["kind"] == "tiktok_live":
+        return run_live_watch(w)
     new = []
     job = {"status": "error", "message": "The check could not start.", "fresh": []}     # placeholder until the real job exists
     cancel = threading.Event()
@@ -2318,15 +3198,71 @@ def run_watch(wid):
             _save(WATCH_FILE, watches)
     if new:
         try:
-            title, body = describe_new(w, new)
-            notify(title, body, ["eyes"])
+            if settings.get("digest") == "daily":
+                digest_add(w, new)
+            else:
+                title, body = describe_new(w, new)
+                notify(title, body, ["eyes"])
         except Exception:  # noqa: BLE001
             app.logger.exception("Could not build the notification")
+
+
+# ---- daily digest: one alert a day instead of one per account ----
+DIGEST_FILE = DATA_DIR / "digest.json"
+dlock = threading.Lock()
+
+
+def digest_add(w, new):
+    low = [n.lower() for n in new]
+    kinds = {"video": sum(l.endswith(VIDEO_EXT) for l in low), "photo": sum(l.endswith(IMG_EXT) for l in low)}
+    with dlock:
+        d = _load(DIGEST_FILE, {})
+        e = d.setdefault("pending", {}).setdefault(w["id"], {"label": w["label"], "count": 0, "video": 0, "photo": 0})
+        e["label"] = w["label"]
+        e["count"] += len(new)
+        for k, v in kinds.items():
+            e[k] += v
+        _save(DIGEST_FILE, d)
+
+
+def digest_text(pending):
+    rows = sorted(pending.values(), key=lambda e: -e["count"])
+    total = sum(e["count"] for e in rows)
+    title = f"👁 Daily digest: {_plural(total, 'new post')} from {_plural(len(rows), 'account')}"
+    lines = []
+    for e in rows[:8]:
+        bits = [p for p in (_plural(e["video"], "video") if e["video"] else "", _plural(e["photo"], "photo") if e["photo"] else "") if p]
+        lines.append(f"• {e['label']}: {e['count']}" + (f" ({', '.join(bits)})" if bits else ""))
+    if len(rows) > 8:
+        lines.append(f"+ {len(rows) - 8} more accounts")
+    return title, "\n".join(lines)
+
+
+def digest_tick(force=False):
+    """Send the digest once a day at the chosen hour (server's local time). Returns what was sent, or None."""
+    if settings.get("digest") != "daily" and not force:
+        return None
+    now = time.localtime()
+    today = time.strftime("%Y-%m-%d", now)
+    with dlock:
+        d = _load(DIGEST_FILE, {})
+        due = force or (now.tm_hour >= int(settings.get("digest_hour", 20)) and d.get("sent_on") != today)
+        if not due or not d.get("pending"):
+            return None
+        title, body = digest_text(d["pending"])
+        d.update(pending={}, sent_on=today)
+        _save(DIGEST_FILE, d)
+    notify(title, body, ["eyes"])
+    return title
 
 
 def scheduler_loop():
     while True:
         time.sleep(15)
+        try:
+            digest_tick()
+        except Exception:  # noqa: BLE001
+            app.logger.exception("Digest error")
         try:
             now = time.time()
             with wlock:
@@ -2351,12 +3287,25 @@ def scheduler_loop():
 def watches_api():
     if request.method == "GET":
         with wlock:
-            return jsonify(success=True, intervals=INTERVALS,
-                           watches=sorted((dict(w) for w in watches.values()), key=lambda w: w["created"]))
+            out = sorted((dict(w) for w in watches.values()), key=lambda w: w["created"])
+        for w in out:
+            if w["kind"] == "tiktok_live":
+                with live_lock:
+                    j = jobs.get(live_now.get(w["target"].lower()) or "")
+                if j and j["status"] in ("queued", "running"):
+                    w["rec"] = {"id": j["id"], "message": j.get("message", ""), "secs": j.get("rec_secs", 0),
+                                "size_h": human(j.get("rec_size", 0))}
+        return jsonify(success=True, intervals=INTERVALS, live_intervals=LIVE_INTERVALS + INTERVALS[:2], watches=out)
     d = json_body()
     kind, target = d.get("kind"), str(d.get("target") or "").strip()
     interval = d.get("interval") if d.get("interval") in INTERVALS else 60
-    if kind == "snapchat":
+    if kind == "tiktok_live":
+        target = live_user_from(target) or target.lstrip("@")
+        if not TT_USER_RE.match(target):
+            return jsonify(success=False, message="Enter a TikTok username or a tiktok.com/@user/live link."), 400
+        key, label, category = f"tiktok_live:{target.lower()}", f"🔴 @{target}", "tiktok"
+        interval = d.get("interval") if d.get("interval") in LIVE_INTERVALS + INTERVALS else 5
+    elif kind == "snapchat":
         target = target.lstrip("@")
         if not SNAP_USER_RE.match(target):
             return jsonify(success=False, message="Invalid Snapchat username."), 400
@@ -2405,7 +3354,7 @@ def watch_action(wid, action):
                 iv = int(json_body().get("interval"))
             except (TypeError, ValueError):
                 iv = None
-            if iv not in INTERVALS:
+            if iv not in (LIVE_INTERVALS + INTERVALS if w["kind"] == "tiktok_live" else INTERVALS):
                 return jsonify(success=False, message="Choose one of: " + ", ".join(map(str, INTERVALS)) + " minutes."), 400
             w["interval"] = iv
             if w.get("last_check"):                          # count from the last check (due now if that is already past)
@@ -2434,6 +3383,43 @@ def settings_api():
             settings["notify_downloads"] = bool(d["notify_downloads"])
         if "prefer_h264" in d:
             settings["prefer_h264"] = bool(d["prefer_h264"])
+        if "name_template" in d:
+            settings["name_template"] = clean_template(d["name_template"])
+        if d.get("speed_limit") in ("0", "500K", "1M", "2M", "5M", "10M"):
+            settings["speed_limit"] = d["speed_limit"]
+        if "parallel_parts" in d:
+            try:
+                settings["parallel_parts"] = max(1, min(8, int(d["parallel_parts"])))
+            except (TypeError, ValueError):
+                return jsonify(success=False, message="Parallel parts must be a number from 1 to 8."), 400
+        if d.get("pace") in ("off", "balanced", "careful"):
+            settings["pace"] = d["pace"]
+        if "retry_count" in d:
+            try:
+                settings["retry_count"] = max(0, min(10, int(d["retry_count"])))
+            except (TypeError, ValueError):
+                return jsonify(success=False, message="Retries must be a number from 0 to 10."), 400
+        if "clean_urls" in d:
+            settings["clean_urls"] = bool(d["clean_urls"])
+        if "live_helper" in d:
+            settings["live_helper"] = bool(d["live_helper"])
+        if d.get("live_quality") in LIVE_QUALITY_ORDER:
+            settings["live_quality"] = d["live_quality"]
+        if "live_max_hours" in d:
+            try:
+                settings["live_max_hours"] = max(1, min(24, int(d["live_max_hours"])))
+            except (TypeError, ValueError):
+                return jsonify(success=False, message="Live time limit must be 1-24 hours."), 400
+        if d.get("digest") in ("off", "daily"):
+            settings["digest"] = d["digest"]
+            if d["digest"] == "off":                      # going back to instant alerts: don't keep a stale backlog
+                with dlock:
+                    _save(DIGEST_FILE, {"pending": {}})
+        if "digest_hour" in d:
+            try:
+                settings["digest_hour"] = max(0, min(23, int(d["digest_hour"])))
+            except (TypeError, ValueError):
+                return jsonify(success=False, message="Digest hour must be 0-23."), 400
         if "ig_cap" in d:
             try:
                 settings["ig_cap"] = max(1, min(500, int(d["ig_cap"])))
@@ -2443,7 +3429,22 @@ def settings_api():
     return jsonify(success=True, ntfy=settings.get("ntfy", ""),
                    creator_folders=settings.get("creator_folders", True), ig_organize=settings.get("ig_organize", True), auto_name=settings.get("auto_name", "date"), prefer_h264=settings.get("prefer_h264", True),
                    notify_downloads=settings.get("notify_downloads", False),
+                   name_template=settings.get("name_template", ""), speed_limit=settings.get("speed_limit", "0"),
+                   parallel_parts=settings.get("parallel_parts", 1), pace=settings.get("pace", "off"),
+                   retry_count=settings.get("retry_count", 3), clean_urls=settings.get("clean_urls", True),
+                   live_helper=settings.get("live_helper", True), live_max_hours=settings.get("live_max_hours", 6),
+                   live_ready=_cffi is not None, live_quality=settings.get("live_quality", "best"),
+                   digest=settings.get("digest", "off"), digest_hour=settings.get("digest_hour", 20),
+                   digest_waiting=sum(e.get("count", 0) for e in _load(DIGEST_FILE, {}).get("pending", {}).values()),
                    ig_cap=ig_cap())
+
+
+@app.route("/digest/send", methods=["POST"])
+def digest_send_now():
+    if not (settings.get("ntfy") or "").strip():
+        return jsonify(success=False, message="Set an ntfy topic first."), 400
+    sent = digest_tick(force=True)
+    return jsonify(success=True, message=sent or "Nothing new is waiting for the digest.")
 
 
 # ---- Instagram login card ------------------------------------------------------
@@ -2609,7 +3610,92 @@ def auto_tags(rel, is_dir=False):
             t.add(seg[:7])
     if not is_dir and file_kind(parts[-1]) != "other":
         t.add(file_kind(parts[-1]))
+        t.update(smart_tags(rel))
     return t
+
+
+# ---- smart tags: read from the media itself (ffprobe), cached in meta.json ----
+META_FILE = DATA_DIR / "meta.json"
+SMART_TAGS = ("vertical", "horizontal", "square", "4k", "hd", "short", "long")
+media_meta = {}                        # "category/…/file" -> {"s": size, "m": mtime, "w": px, "h": px, "d": seconds}
+mlock = threading.Lock()
+
+
+def smart_tags(rel):
+    with mlock:
+        m = media_meta.get(rel)
+    if not m:
+        return set()
+    t, w, h, d = set(), m.get("w") or 0, m.get("h") or 0, m.get("d") or 0
+    if w and h:
+        r = w / h
+        t.add("square" if 0.9 <= r <= 1.1 else "vertical" if r < 1 else "horizontal")
+        if min(w, h) >= 2000:
+            t.add("4k")
+        elif min(w, h) >= 720:
+            t.add("hd")
+    if d and file_kind(rel) in ("video", "audio"):
+        if d < 60:
+            t.add("short")
+        elif d >= 20 * 60:
+            t.add("long")
+    return t
+
+
+def _probe(path):
+    ff = shutil.which("ffprobe")
+    if not ff:
+        return None
+    try:
+        r = subprocess.run([ff, "-v", "error", "-show_entries", "stream=codec_type,width,height:format=duration",
+                            "-of", "json", str(path)], capture_output=True, text=True, timeout=30)
+        data = json.loads(r.stdout or "{}")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {}
+    v = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), {})
+    try:
+        dur = float((data.get("format") or {}).get("duration") or 0)
+    except (TypeError, ValueError):
+        dur = 0
+    return {"w": int(v.get("width") or 0), "h": int(v.get("height") or 0), "d": round(dur, 1)}
+
+
+def meta_loop():
+    """Quietly probe new files in the background (a few per pass) so tags appear without slowing anything down."""
+    with mlock:
+        media_meta.update(_load(META_FILE, {}))
+    while True:
+        time.sleep(20)
+        if not shutil.which("ffprobe"):
+            continue
+        try:
+            files = fs_index()
+            live = {rel for rel, _s, _m in files}
+            changed, done = False, 0
+            for rel, size, mt in files:
+                if file_kind(rel) == "other":
+                    continue
+                with mlock:
+                    m = media_meta.get(rel)
+                if m and m.get("s") == size and m.get("m") == int(mt):
+                    continue
+                info = _probe(BASE_DIR / rel)
+                if info is None:
+                    break
+                with mlock:
+                    media_meta[rel] = dict(info, s=size, m=int(mt))
+                changed, done = True, done + 1
+                if done >= 40:
+                    break
+            with mlock:
+                for gone in [k for k in media_meta if k not in live]:      # forget deleted/moved files
+                    media_meta.pop(gone)
+                    changed = True
+                snap = dict(media_meta) if changed else None
+            if snap is not None:
+                _save(META_FILE, snap)
+        except Exception:  # noqa: BLE001
+            app.logger.exception("Media probe pass failed")
 
 
 def manual_for(rel):
@@ -2632,6 +3718,8 @@ def tag_group(t):
         return "sites"
     if t in ("video", "photo", "audio") or t in TYPE_FOLDERS:
         return "types"
+    if t in SMART_TAGS:
+        return "smart"
     return "dates" if re.fullmatch(r"\d{4}-\d{2}", t) else "custom"
 
 
@@ -2752,6 +3840,148 @@ def fs_tags():
                   key=lambda x: (-x["count"], x["name"]))
     return jsonify(success=True, tags=tags, files=len(fs_index()), total_h=human(total),
                    free_h=human(shutil.disk_usage(BASE_DIR).free))
+
+
+# ---- duplicates, storage dashboard, cleanup ----
+_hash_cache = {}                       # (rel, size, mtime) -> quick content hash
+_ID_RE = re.compile(r"\[([A-Za-z0-9_-]{6,})\]$")
+SIDECAR_EXT = (".description", ".info.json", ".live_chat.json")
+PARTIAL_MIN_AGE = 3 * 3600             # leftovers older than this are not an active download any more
+
+
+def _quick_hash(path, size):
+    """Size + first, middle and last MB: identical for identical files, fast even for 4K videos."""
+    h = hashlib.blake2b(str(size).encode(), digest_size=16)
+    with open(path, "rb") as f:
+        if size <= 3 << 20:
+            h.update(f.read())
+        else:
+            for pos in (0, size // 2, size - (1 << 20)):
+                f.seek(pos)
+                h.update(f.read(1 << 20))
+    return h.hexdigest()
+
+
+def find_duplicates():
+    """Groups of the same media saved more than once. Oldest copy first (that is the one cleanup keeps)."""
+    by_size, by_id = {}, {}
+    for rel, size, mt in fs_index():
+        kind = file_kind(rel)
+        if kind == "other" or size < 1024:
+            continue
+        by_size.setdefault(size, []).append((rel, size, mt))
+        m = _ID_RE.search(Path(rel).stem)
+        if m and kind in ("video", "audio"):
+            by_id.setdefault((m.group(1), kind), []).append((rel, size, mt))
+    groups, seen = [], set()
+    for same in by_size.values():
+        if len(same) < 2:
+            continue
+        by_hash = {}
+        for rel, size, mt in same:
+            key = (rel, size, int(mt))
+            if key not in _hash_cache:
+                try:
+                    _hash_cache[key] = _quick_hash(BASE_DIR / rel, size)
+                except OSError:
+                    continue
+            by_hash.setdefault(_hash_cache[key], []).append((rel, size, mt))
+        for g in by_hash.values():
+            if len(g) > 1:
+                groups.append(("identical", g))
+                seen.update(r for r, _s, _m in g)
+    for (vid, _k), g in by_id.items():                 # same video id, different file (e.g. 720p and 1080p)
+        g = [x for x in g if x[0] not in seen]
+        if len(g) > 1:
+            groups.append(("same video", g))
+    out = []
+    for reason, g in groups:
+        g = sorted(g, key=lambda x: x[2])
+        wasted = sum(s for _r, s, _m in g[1:])
+        out.append({"reason": reason, "wasted": wasted, "wasted_h": human(wasted),
+                    "items": [_item(r, s, m, False) for r, s, m in g]})
+    return sorted(out, key=lambda x: -x["wasted"])
+
+
+def _leftovers():
+    """Files nobody needs: unfinished downloads (old .part files) and yt-dlp's info/description side files."""
+    now, parts, sides = time.time(), [], []
+    for cat in CATEGORIES:
+        for dp, _dn, fns in os.walk(BASE_DIR / cat):
+            for fn in fns:
+                fp = os.path.join(dp, fn)
+                try:
+                    st = os.stat(fp)
+                except OSError:
+                    continue
+                rel = Path(fp).relative_to(BASE_DIR).as_posix()
+                if is_partial(fn) and now - st.st_mtime > PARTIAL_MIN_AGE:
+                    parts.append((rel, st.st_size))
+                elif fn.lower().endswith(SIDECAR_EXT):
+                    sides.append((rel, st.st_size))
+    return parts, sides
+
+
+@app.route("/fs/dupes")
+def fs_dupes():
+    groups = find_duplicates()
+    wasted = sum(g["wasted"] for g in groups)
+    return jsonify(success=True, groups=groups, wasted_h=human(wasted), extra=sum(len(g["items"]) - 1 for g in groups))
+
+
+@app.route("/fs/storage")
+def fs_storage():
+    sites, users, kinds, months, total = {}, {}, {}, {}, 0
+    files = fs_index()
+    for rel, size, mt in files:
+        total += size
+        parts = rel.split("/")
+        sites[parts[0]] = sites.get(parts[0], 0) + size
+        if len(parts) >= 3:
+            k = parts[0] + "/" + parts[1]
+            users[k] = users.get(k, 0) + size
+        kd = file_kind(rel)
+        kinds[kd] = kinds.get(kd, 0) + size
+        mo = time.strftime("%Y-%m", time.localtime(mt))
+        months[mo] = months.get(mo, 0) + size
+    du = shutil.disk_usage(BASE_DIR)
+    parts, sides = _leftovers()
+    ident = [g for g in find_duplicates() if g["reason"] == "identical"]       # what "Clean up" removes
+    rows = lambda d, n=None: [{"name": k, "size": v, "size_h": human(v)} for k, v in sorted(d.items(), key=lambda x: -x[1])[:n]]
+    return jsonify(success=True, total=total, total_h=human(total), files=len(files),
+                   disk={"total": du.total, "used": du.used, "free": du.free, "total_h": human(du.total), "free_h": human(du.free)},
+                   sites=rows(sites), users=rows(users, 12), kinds=rows(kinds),
+                   months=[{"name": k, "size": v, "size_h": human(v)} for k, v in sorted(months.items())[-12:]],
+                   cleanup={"partials": {"count": len(parts), "size_h": human(sum(s for _r, s in parts))},
+                            "sidecars": {"count": len(sides), "size_h": human(sum(s for _r, s in sides))},
+                            "dupes": {"count": sum(len(g["items"]) - 1 for g in ident), "size_h": human(sum(g["wasted"] for g in ident))}})
+
+
+@app.route("/fs/cleanup", methods=["POST"])
+def fs_cleanup():
+    what = json_body().get("what")
+    if what == "partials":
+        rels = [r for r, _s in _leftovers()[0]]
+    elif what == "sidecars":
+        rels = [r for r, _s in _leftovers()[1]]
+    elif what == "dupes":                                  # identical copies only - "same video" groups need you to choose
+        rels = [it["path"] for g in find_duplicates() if g["reason"] == "identical" for it in g["items"][1:]]
+    else:
+        return jsonify(success=False, message="Unknown cleanup."), 400
+    done, freed = 0, 0
+    for rel in rels:
+        ap = fs_abs(rel)
+        if ap is None or not ap.is_file():
+            continue
+        try:
+            size = ap.stat().st_size
+            ap.unlink()
+        except OSError:
+            continue
+        _retag(rel, None)
+        done, freed = done + 1, freed + size
+    fs_dirty()
+    return jsonify(success=True, deleted=done, freed_h=human(freed))
 
 
 def _paths(d, key="paths"):
@@ -3215,6 +4445,7 @@ settings.update(_load(SETTINGS_FILE, {}))
 for _w in watches.values():
     _w["busy"] = False
 threading.Thread(target=scheduler_loop, daemon=True, name="scheduler").start()
+threading.Thread(target=meta_loop, daemon=True, name="meta").start()
 
 
 # --------------------------------------------------------------------------- #

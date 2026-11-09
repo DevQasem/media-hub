@@ -10,7 +10,7 @@
 <meta name="apple-mobile-web-app-title" content="Media Hub"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Media Hub</title>
 <link rel="stylesheet" href="/assets/style.css">
-<script id="early">try{var u=JSON.parse(localStorage.getItem("hub_ui")||"{}"),d=document.documentElement;["theme","size","density"].forEach(function(k){if(u[k])d.dataset[k]=u[k]})}catch(e){}</script>
+<script id="early">try{var u=JSON.parse(localStorage.getItem("hub_ui")||"{}"),d=document.documentElement;["theme","size","density","palette"].forEach(function(k){if(u[k])d.dataset[k]=u[k]});var t=u.theme||"dark";d.dataset.scheme=(t==="light"||(t==="auto"&&matchMedia("(prefers-color-scheme: light)").matches))?"light":"dark"}catch(e){document.documentElement.dataset.scheme="dark"}</script>
 <script src="/assets/script.js" defer></script>
 </head>
 <body data-site="other" data-tab="home">
@@ -27,6 +27,8 @@
 <div class="shell">
 <aside class="rail" id="rail" aria-label="Main">
   <button data-nav="home" class="on"><span>🏠</span><b>Download</b></button>
+  <button data-nav="live"><span>🔴</span><b>Live</b><em id="rnLive"></em></button>
+  <button data-nav="queue"><span>☰</span><b>Queue</b></button>
   <button data-nav="watch"><span>👁</span><b>Watchlist</b><em id="rnWatch"></em></button>
   <button data-nav="files"><span>📁</span><b>Files</b></button>
   <button data-nav="settings"><span>⚙️</span><b>Settings</b><i class="wdot" data-sdot></i></button>
@@ -58,6 +60,7 @@
     <div class="preview" id="preview">
       <div class="thumb loading" id="thumb"><div class="timg" id="timg0"></div><div class="tclip"><div class="timg" id="timg"></div></div><span class="cmpline"><i></i></span><input type="range" class="cmp" id="cmp" min="0" max="100" value="50" aria-label="Drag to compare the original with your look"><span class="cmplab l">Original</span><span class="cmplab r">With look</span><span class="badge site" id="siteBadge"></span><span class="dur" id="dur" style="display:none"></span></div>
       <div class="pinfo"><div class="ptitle" id="ptitle" title="Tap to show the full title"></div><div class="chips" id="chips"></div></div>
+      <p class="pnote" id="plnote" style="display:none"><button class="linkbtn" id="pickVideosBtn" style="padding:0">☑ Choose which videos from this list…</button></p>
     </div>
     <!-- snapchat preview -->
     <div class="preview" id="snapbox">
@@ -89,9 +92,9 @@
 
     <!-- customize panel -->
     <div class="custom" id="custom">
-      <div class="csec" data-show="video,audio,image,gif,sticker"><div class="olabel">What do you want?</div>
+      <div class="csec" data-show="video,audio,image,gif,sticker,subs"><div class="olabel">What do you want?</div>
         <div class="seg" id="kindseg">
-          <button data-kind="video"><b>🎬</b>Video</button><button data-kind="audio"><b>🎵</b>MP3 / audio</button><button data-kind="image"><b>🖼</b>Photo</button><button data-kind="gif"><b>🎞</b>GIF</button><button data-kind="sticker"><b>🧩</b>Sticker</button>
+          <button data-kind="video"><b>🎬</b>Video</button><button data-kind="audio"><b>🎵</b>MP3 / audio</button><button data-kind="subs"><b>💬</b>Subtitles</button><button data-kind="image"><b>🖼</b>Photo</button><button data-kind="gif"><b>🎞</b>GIF</button><button data-kind="sticker"><b>🧩</b>Sticker</button>
         </div></div>
       <div class="csec" data-show="video,image,snap,gif,sticker,ig"><div class="olabel">✨ Look - tap one, the preview changes live</div><div class="looks" id="looks"></div></div>
       <div class="csec" data-show="video,audio,image,gif,sticker"><div class="olabel">⚡ Quick presets</div><div class="presets" id="presets"></div></div>
@@ -115,10 +118,10 @@
         <div class="osec" data-show="gif,sticker"><div class="note">🎞 <b>GIF</b>: first 8 s (or your clip, up to 15 s), 480 px, looping.<br>🧩 <b>Sticker</b>: 512×512 animated WebP of up to 6 s, auto-shrunk under 500 KB (WhatsApp size). A photo becomes a static sticker. Use <b>Clip</b> below to pick the part, and <b>Effects</b> to style it.</div></div>
         <div class="osec" data-show="ig"><div class="note">📸 Instagram photos, carousels, stories, highlights and profiles are saved with <b>gallery-dl</b> into <i>instagram/&lt;username&gt;/</i>. Looks and effects (below) are applied to the new files. A whole profile takes only the first items (see <b>Items</b>) so Instagram does not get suspicious.</div></div>
 
-        <div class="osec" data-show="video,audio,image"><div class="olabel">Extras</div>
+        <div class="osec" data-show="video,audio,image,subs"><div class="olabel">Extras</div>
           <div class="tgs">
             <label class="tg" data-show="video,audio"><input type="checkbox" data-o="subs"><span>💬 Subtitles</span></label>
-            <label class="tg" data-show="video,audio"><input type="checkbox" data-o="autosubs"><span>🤖 Auto-captions</span></label>
+            <label class="tg" data-show="video,audio,subs"><input type="checkbox" data-o="autosubs"><span>🤖 Auto-captions</span></label>
             <label class="tg" data-show="video"><input type="checkbox" data-o="embed_subs"><span>📎 Embed subs</span></label>
             <label class="tg" data-show="video,audio"><input type="checkbox" data-o="thumb"><span>🖼 Save cover</span></label>
             <label class="tg" data-show="video,audio"><input type="checkbox" data-o="embed_thumb"><span>🎨 Embed cover art</span></label>
@@ -127,7 +130,9 @@
             <label class="tg" data-show="video,audio,image"><input type="checkbox" data-o="desc"><span>📝 Save description</span></label>
             <label class="tg" data-show="video,audio,image"><input type="checkbox" data-o="force"><span>🔁 Re-download if it exists</span></label>
           </div>
-          <div class="fld" style="margin-top:10px;max-width:260px" data-show="video,audio"><label>Subtitle languages (comma separated)</label><input data-o="sub_langs" placeholder="en,ar"></div></div>
+          <div class="grid2" style="margin-top:10px" data-show="video,audio,subs"><div class="fld"><label>Subtitle languages (comma separated)</label><input data-o="sub_langs" placeholder="en,ar"></div>
+            <div class="fld"><label>Subtitle format</label><select data-o="sub_fmt"><option value="srt">SRT (works everywhere)</option><option value="vtt">VTT (web)</option><option value="ass">ASS (styled)</option></select></div></div></div>
+        <div class="osec" data-show="subs"><div class="note">💬 Saves <b>only the subtitle files</b> (no video). Tick <b>Auto-captions</b> to also take YouTube's automatic ones. Works on every site yt-dlp can read subtitles from.</div></div>
         <div class="osec" data-show="ig"><div class="tgs"><label class="tg"><input type="checkbox" data-o="force"><span>🔁 Re-download if it exists</span></label></div></div>
 
         <div class="osec" data-show="video,image,snap,gif,sticker,ig"><div class="olabel">✨ Effects &amp; looks (applied after download)</div>
@@ -183,6 +188,31 @@
     </div>
   </section>
 
+  <!-- TikTok LIVE page -->
+  <section class="livepage view-live" id="livePage" aria-label="TikTok LIVE">
+    <header class="lvhead">
+      <div><h2>🔴 TikTok LIVE</h2><p class="hint" style="margin:2px 0 0">Record lives now, or watch accounts and record every time they go live.</p></div>
+      <div class="lvstats" id="lvStats"></div>
+    </header>
+
+    <div class="lvadd">
+      <input id="lvUser" placeholder="TikTok username or tiktok.com/@user/live link" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="TikTok username">
+      <select id="lvInt" class="wsel" aria-label="Check how often"><option value="2">every 2 min</option><option value="5" selected>every 5 min</option><option value="10">every 10 min</option><option value="15">every 15 min</option><option value="30">every 30 min</option></select>
+      <button class="btn ghost" id="lvWatchBtn">👁 Watch</button>
+      <button class="btn primary" id="lvRecBtn">🔴 Record now</button>
+    </div>
+    <p class="hint" id="lvHint"></p>
+
+    <h3 class="sec lvsec">⏺ Recording now <em id="lvRecCount"></em></h3>
+    <div id="lvRec" class="lvrec"></div>
+
+    <h3 class="sec lvsec">👁 Watched accounts <em id="lvAccCount"></em></h3>
+    <div id="lvAcc" class="lvacc"></div>
+
+    <h3 class="sec lvsec">🎞 Saved lives <em id="lvSavedSum"></em></h3>
+    <div id="lvSaved"></div>
+  </section>
+
 
 </main>
 </div>
@@ -210,6 +240,7 @@
     <nav class="sxnav" id="sxnav" aria-label="Settings sections">
       <button data-sec="look" class="on"><span>🎨</span>Appearance</button>
       <button data-sec="dl"><span>📥</span>Downloads</button>
+      <button data-sec="speed"><span>⚡</span>Speed &amp; names</button>
       <button data-sec="phone"><span>📲</span>Phone</button>
       <button data-sec="ig"><span>📸</span>Instagram<i class="wdot" data-sdot></i></button>
       <button data-sec="notify"><span>🔔</span>Notifications</button>
@@ -218,7 +249,15 @@
     <div class="sxpanes">
       <section class="sxpane on" data-pane="look">
         <h4>🎨 Appearance</h4>
-        <div class="sublab" style="margin-top:0">Theme</div>
+        <div class="sublab" style="margin-top:0">Look</div>
+        <div class="presets-grid" id="presetBox">
+          <button data-look="classic"><i class="pv pv-classic"><u></u><u></u><u></u></i><b>Classic</b><small>Violet glow</small></button>
+          <button data-look="midnight"><i class="pv pv-midnight"><u></u><u></u><u></u></i><b>Midnight</b><small>Deep navy</small></button>
+          <button data-look="neon"><i class="pv pv-neon"><u></u><u></u><u></u></i><b>Neon</b><small>Black &amp; electric</small></button>
+          <button data-look="sunset"><i class="pv pv-sunset"><u></u><u></u><u></u></i><b>Sunset</b><small>Warm plum</small></button>
+          <button data-look="paper"><i class="pv pv-paper"><u></u><u></u><u></u></i><b>Paper</b><small>Light &amp; calm</small></button>
+        </div>
+        <div class="sublab">Theme</div>
         <div class="opt" id="themeOptBox"><button data-ui="theme:dark">🌙 Dark</button><button data-ui="theme:light">☀️ Light</button><button data-ui="theme:auto">🌗 Auto</button></div>
         <div class="sublab">Accent color</div>
         <div class="opt" id="accents"><button class="sw auto" data-ui="accent:auto" title="Follows the site you paste (TikTok, YouTube…)" aria-label="Accent: follow the site"></button></div>
@@ -238,6 +277,31 @@
         <div class="fld" style="margin-top:14px;max-width:380px"><label>When I leave “Name it” empty (videos)</label><select id="autoName"><option value="date">Date + number  (2026-10-31_001)</option><option value="keep">Keep the original title</option></select></div>
         <label class="tg" style="display:block;margin-top:16px"><input type="checkbox" id="preferH264"><span>📱 Make videos iPhone-friendly (H.264)</span></label>
         <p class="hint" style="margin-top:4px">iPhone Photos only accepts H.264 / HEVC videos. Without this, YouTube can give VP9/AV1 files that Photos refuses. (YouTube is then limited to 1080p.)</p>
+        <div class="sublab" style="margin-top:18px">🔴 TikTok LIVE</div>
+        <p class="hint" style="margin:0 0 8px">Paste a <b>tiktok.com/@user/live</b> link to record it now, or press <b>Watch</b> to record every time they go live. Recordings go to <i>tiktok/&lt;user&gt;/lives/</i>.</p>
+        <label class="tg" style="display:block"><input type="checkbox" id="liveHelper"><span>Use the tikrec.com helper when TikTok blocks the check</span></label>
+        <p class="hint" style="margin-top:4px">Only used when TikTok refuses the direct check. That service then sees which username is being checked.</p>
+        <div class="grid2" style="margin-top:10px;max-width:560px">
+          <div class="fld"><label>Recording quality</label><select id="liveQuality"><option value="best">Original - best quality (biggest files)</option><option value="hd">HD - smaller files</option><option value="sd">SD - smallest files</option></select></div>
+        </div>
+        <div class="fld" style="margin-top:10px;max-width:280px"><label>Stop a recording after</label><select id="liveMax"><option value="1">1 hour</option><option value="2">2 hours</option><option value="3">3 hours</option><option value="4">4 hours</option><option value="6">6 hours</option><option value="8">8 hours</option><option value="12">12 hours</option><option value="24">24 hours</option></select></div>
+        <p class="hint" id="liveReady"></p>
+      </section>
+      <section class="sxpane" data-pane="speed">
+        <h4>⚡ Speed &amp; names</h4>
+        <div class="fld" style="max-width:420px"><label>File name template (leave empty for the normal title name)</label><input id="nameTpl" placeholder="{uploader} - {title} [{id}]" maxlength="150" autocomplete="off" spellcheck="false"></div>
+        <div class="opt" id="tplChips" style="margin-top:8px"><button data-tpl="{title}">{title}</button><button data-tpl="{uploader}">{uploader}</button><button data-tpl="{id}">{id}</button><button data-tpl="{date}">{date}</button><button data-tpl="{resolution}">{resolution}</button><button data-tpl="{playlist_index}">{playlist_index}</button></div>
+        <p class="hint" style="margin-top:6px">Tap a chip to add it. Use <b>/</b> for sub-folders, e.g. <i>{date}/{title}</i>. Add <b>{id}</b> so two videos with the same title never clash. Applies to videos and audio (not Instagram or Snapchat).</p>
+        <p class="hint" id="tplprev" style="margin-top:0"></p>
+        <button class="btn ghost" id="saveTplBtn" style="margin-bottom:6px">💾 Save name template</button>
+        <div class="grid2" style="margin-top:14px;max-width:560px">
+          <div class="fld"><label>Speed limit</label><select id="speedLimit"><option value="0">Unlimited</option><option value="500K">500 KB/s</option><option value="1M">1 MB/s</option><option value="2M">2 MB/s</option><option value="5M">5 MB/s</option><option value="10M">10 MB/s</option></select></div>
+          <div class="fld"><label>Parts at once (faster on YouTube)</label><select id="parallelParts"><option value="1">1 (default)</option><option value="2">2</option><option value="4">4</option><option value="6">6</option><option value="8">8</option></select></div>
+          <div class="fld"><label>Pause between requests</label><select id="paceSel"><option value="off">Off</option><option value="balanced">Balanced</option><option value="careful">Careful (slow, gentle)</option></select></div>
+          <div class="fld"><label>Retry a failed download</label><select id="retryCount"><option value="0">Never</option><option value="3">3 times</option><option value="5">5 times</option><option value="10">10 times</option></select></div>
+        </div>
+        <p class="hint" style="margin-top:6px">Retries wait longer each time (2 s, 4 s, 8 s …). “Careful” helps when a site starts refusing you for asking too fast.</p>
+        <label class="tg" style="display:block;margin-top:12px"><input type="checkbox" id="cleanUrls"><span>🧹 Clean links automatically (removes tracking like <i>si=</i>, <i>utm_…</i>, <i>fbclid</i>; opens YouTube redirect links)</span></label>
       </section>
       <section class="sxpane" data-pane="ig">
         <h4>📸 Instagram login</h4>
@@ -265,7 +329,13 @@
       <section class="sxpane" data-pane="notify">
         <h4>🔔 Phone notifications</h4>
         <label class="tg" style="display:block;margin-bottom:14px"><input type="checkbox" id="notifyDl"><span>Also alert me when a download I started finishes</span></label>
-        <div class="sublab" style="margin-top:0">Watchlist alerts and the alert above are sent through ntfy:</div>
+        <div class="sublab" style="margin-top:0">Watchlist alerts</div>
+        <div class="grid2" style="max-width:520px">
+          <div class="fld"><label>How often</label><select id="digestSel"><option value="off">Right away (one per account)</option><option value="daily">Daily digest (one alert a day)</option></select></div>
+          <div class="fld" id="digestHourBox" hidden><label>Send the digest at</label><select id="digestHour"><option value="7">07:00</option><option value="8">08:00</option><option value="9">09:00</option><option value="12">12:00</option><option value="18">18:00</option><option value="20">20:00</option><option value="21">21:00</option><option value="22">22:00</option></select></div>
+        </div>
+        <p class="hint" style="margin-top:6px"><span id="digestMsg"></span> <button class="linkbtn" id="digestNowBtn" style="padding:0">Send it now</button></p>
+        <div class="sublab">Alerts are sent through ntfy:</div>
         <div class="row2">
           <input id="ntfy" placeholder="ntfy topic, e.g. media-hub-k39xq2" autocomplete="off" spellcheck="false">
           <button class="icon-btn" id="saveNtfyBtn">Save</button><button class="icon-btn" id="testNtfyBtn">Send test</button>
@@ -301,6 +371,7 @@
 <nav class="tabbar" id="tabbar" aria-label="Main">
   <i class="tabind"></i>
   <button data-tab="home" class="on"><span>🏠</span>Home<em id="tbRun"></em></button>
+  <button data-tab="live"><span>🔴</span>Live<em id="tbLive"></em></button>
   <button data-tab="watch"><span>👁</span>Watchlist<em id="tbWatch"></em></button>
   <button id="navFilesBtn"><span>📁</span>Files</button>
   <button id="navSettingsBtn"><span>⚙️</span>Settings<i class="wdot" data-sdot></i></button>
@@ -317,8 +388,18 @@
   <div class="krow"><span>Tools (maintenance)</span><span><kbd>T</kbd></span></div>
   <div class="krow"><span>Watchlist / Home</span><span><kbd>W</kbd> / <kbd>H</kbd></span></div>
   <div class="krow"><span>Saved files</span><span><kbd>F</kbd></span></div>
+  <div class="krow"><span>Download queue</span><span><kbd>Q</kbd></span></div>
   <div class="krow"><span>Close any popup</span><span><kbd>Esc</kbd></span></div>
   <p class="note" style="margin:12px 0 0">You can also drag a link from another tab and drop it on the page.</p>
+</div></div>
+
+<!-- download queue -->
+<div class="overlay" id="qmodal" role="dialog" aria-modal="true" aria-label="Download queue"><div class="mcard sheet qsheet">
+  <div class="shead"><h3>☰ Queue</h3><button class="mini" id="closeQueueBtn" aria-label="Close queue">✕</button></div>
+  <p class="hint" id="qsum" style="margin:0 2px 10px"></p>
+  <div class="pickbar"><button class="mini" id="qPauseAll">⏸ Pause all</button><button class="mini" id="qResumeAll">▶ Resume all</button></div>
+  <div id="qlist"></div>
+  <p class="note" style="margin:12px 0 0">A paused download continues where it stopped. Only downloads that are waiting can be moved.</p>
 </div></div>
 
 <!-- story picker -->
@@ -327,6 +408,14 @@
   <div class="pickbar"><button class="mini" id="pickAllBtn">All</button><button class="mini" id="pickNewBtn">Only not saved</button><button class="mini" id="pickNoneBtn">None</button></div>
   <div class="pgrid" id="pgrid"></div>
   <button class="btn primary wide" id="pickGoBtn">Download</button>
+</div></div>
+
+<!-- playlist / channel picker -->
+<div class="overlay" id="plmodal" role="dialog" aria-modal="true" aria-label="Choose videos"><div class="mcard sheet">
+  <div class="shead"><h3 id="pltitle">☑ Choose videos</h3><button class="mini" id="closePlBtn" aria-label="Close">✕</button></div>
+  <div class="pickbar"><button class="mini" id="plAllBtn">All</button><button class="mini" id="plNoneBtn">None</button><input id="plFilter" class="plfilter" placeholder="Filter by title…" autocomplete="off" aria-label="Filter videos"></div>
+  <div class="plist" id="plist"></div>
+  <button class="btn primary wide" id="plGoBtn">Download</button>
 </div></div>
 
 <!-- file explorer -->
@@ -338,16 +427,16 @@
   </aside>
   <section class="xmain">
     <header class="xbar">
-      <button class="xbtn xmenu" id="xMenuBtn" aria-label="Menu"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
-      <button class="xbtn" id="xUpBtn" title="Up one folder (Backspace)" aria-label="Up"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button>
+      <button class="xbtn xmenu" id="xMenuBtn" aria-label="Menu"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg><span class="xl">Folders</span></button>
+      <button class="xbtn" id="xUpBtn" title="Up one folder (Backspace)" aria-label="Up"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg><span class="xl">Up</span></button>
       <span class="xbreak"></span><div class="xcrumbs" id="xcrumbs"></div>
       <div class="xsearch"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg><div id="xfilters"></div><input id="xq" placeholder="Search names, users, tags…   ( / )" autocomplete="off" spellcheck="false"></div>
       <select id="xsort" class="wsel" aria-label="Sort by"><option value="modified">Date</option><option value="name">Name</option><option value="size">Size</option><option value="type">Type</option></select>
       <button class="xbtn" id="xdesc" title="Sort direction" aria-label="Sort direction"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6"/></svg></button>
-      <button class="xbtn" id="xSelBtn" title="Select several files (tap to tick)" aria-label="Select several"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/></svg></button>
+      <button class="xbtn" id="xSelBtn" title="Select several files (tap to tick)" aria-label="Select several"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/></svg><span class="xl">Select</span></button>
       <input type="range" id="xsize" min="100" max="260" value="150" aria-label="Icon size">
-      <div class="xseg"><button id="xGrid" title="Grid view" aria-label="Grid view"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.5"/></svg></button><button id="xList" title="List view" aria-label="List view"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7h11M9 12h11M9 17h11"/><circle cx="4.5" cy="7" r=".8"/><circle cx="4.5" cy="12" r=".8"/><circle cx="4.5" cy="17" r=".8"/></svg></button></div>
-      <button class="xbtn" id="closeFilesBtn" aria-label="Close files"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+      <div class="xseg"><button id="xGrid" title="Grid view" aria-label="Grid view"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.5"/></svg><span class="xl">Grid</span></button><button id="xList" title="List view" aria-label="List view"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7h11M9 12h11M9 17h11"/><circle cx="4.5" cy="7" r=".8"/><circle cx="4.5" cy="12" r=".8"/><circle cx="4.5" cy="17" r=".8"/></svg><span class="xl">List</span></button></div>
+      <button class="xbtn" id="closeFilesBtn" aria-label="Close files"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg><span class="xl">Close</span></button>
     </header>
     <div class="xscroll" id="xscroll" tabindex="0"><div id="xgrid" class="xgrid grid"></div><div class="xband" id="xband"></div></div>
     <div class="xact" id="xact"></div>
@@ -358,7 +447,7 @@
   <div class="xdlg" id="xdlg"></div>
   <div class="xlb" id="xlb">
     <div class="xlbtop"><b id="xlbt"></b><span style="flex:1"></span>
-      <a class="xbtn" id="xlbdl" download title="Download">⬇</a><button class="xbtn" id="xlbphone" title="Send to phone">📲</button><button class="xbtn" id="xlbtag" title="Tags">🏷️</button><button class="xbtn" id="xlbdel" title="Delete">🗑️</button><button class="xbtn" id="xlbx" aria-label="Close">✕</button></div>
+      <a class="xbtn" id="xlbdl" download title="Download"><span class="xi2">⬇</span><span class="xl">Save</span></a><button class="xbtn" id="xlbphone" title="Send to phone"><span class="xi2">📲</span><span class="xl">Photos</span></button><button class="xbtn" id="xlbtag" title="Tags"><span class="xi2">🏷️</span><span class="xl">Tags</span></button><button class="xbtn" id="xlbdel" title="Delete"><span class="xi2">🗑️</span><span class="xl">Delete</span></button><button class="xbtn" id="xlbx" aria-label="Close"><span class="xi2">✕</span><span class="xl">Close</span></button></div>
     <button class="xnav l" id="xlbp" aria-label="Previous">‹</button>
     <div class="xlbm" id="xlbm"></div>
     <button class="xnav r" id="xlbn" aria-label="Next">›</button>
