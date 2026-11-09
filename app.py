@@ -48,7 +48,7 @@ import zlib
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutTimeout
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from flask import Flask, jsonify, redirect, render_template, request, send_file, send_from_directory
 from werkzeug.exceptions import HTTPException
@@ -123,7 +123,7 @@ def load_jobs():
     for j in items if isinstance(items, list) else []:
         if not isinstance(j, dict) or "id" not in j:
             continue
-        if j.get("status") in ("queued", "running"):
+        if j.get("status") in ("queued", "running", "paused"):
             j.update(status="error", message="Server restarted before this finished.",
                      finished=time.time())
         j.setdefault("fresh", [])
@@ -236,6 +236,10 @@ def finish_ok(job, files, message=None, fresh=None):
 
 
 def finish_err(job, msg):
+    if job.get("pausing"):                               # stopped by "Pause", not by a failure: keep it for Resume
+        update(job, status="paused", pausing=False, message="Paused - press Resume to continue", speed="", eta="")
+        save_jobs()
+        return
     update(job, status="error", message=str(msg)[:500], finished=time.time())
     save_jobs()
     _after_finish(job, False)
@@ -470,7 +474,7 @@ DEFAULT_OPTS = {
     "kind": "video",            # video | audio | image (cover/thumbnail as JPG) | gif | sticker
     "quality": "best", "container": "mp4", "compat": False,     # compat = H.264, plays everywhere
     "audio_fmt": "mp3", "abr": "192",
-    "subs": False, "autosubs": False, "sub_langs": "en", "embed_subs": False,
+    "subs": False, "autosubs": False, "sub_langs": "en", "sub_fmt": "srt", "embed_subs": False,
     "thumb": False, "embed_thumb": False, "meta": False, "sponsor": False, "desc": False,
     "playlist": "single", "items": "",                          # single | all, "1-5"
     "clip_start": "", "clip_end": "",                           # "1:30" or seconds
@@ -485,10 +489,10 @@ DEFAULT_OPTS = {
     "fx_rotate": "0", "fx_speed": "1", "fx_crop": "none", "fx_scale": "none",
     "fx_mute": False, "fx_keep": True,                           # fx_keep = keep the original too
 }
-_ENUMS = {"kind": {"video", "audio", "image", "gif", "sticker"},
+_ENUMS = {"kind": {"video", "audio", "image", "gif", "sticker", "subs"},
           "quality": {"best", "2160", "1440", "1080", "720", "480", "360"},
           "container": {"mp4", "mkv", "webm"},
-          "audio_fmt": {"mp3", "m4a", "opus", "flac", "wav"},
+          "audio_fmt": {"mp3", "m4a", "opus", "flac", "wav"}, "sub_fmt": {"srt", "vtt", "ass"},
           "abr": {"96", "128", "192", "256", "320"}, "playlist": {"single", "all"},
           "ig_what": {"posts", "stories", "highlights", "all"},
           "fx_look": {"none", "bw", "sepia", "negative", "vivid", "warm", "cool", "vintage", "cinematic"},
@@ -619,6 +623,77 @@ def has_filters(o):
                                   "min_views", "max_mb", "title_has", "title_not"))
 
 
+# ---- Arroxy-style controls: speed limit, parallel parts, request pacing, retries, filename template ----
+_RATE = {"500K": 500 * 1024, "1M": 1024 ** 2, "2M": 2 * 1024 ** 2, "5M": 5 * 1024 ** 2, "10M": 10 * 1024 ** 2}
+_TPL = {"title": "%(title).120B", "uploader": "%(uploader,channel,creator|Unknown).60B", "id": "%(id)s",
+        "date": "%(upload_date>%Y-%m-%d|unknown-date)s", "resolution": "%(height&{}p|)s", "playlist_index": "%(playlist_index|)s"}
+_TPL_RE = re.compile(r"\{(" + "|".join(_TPL) + r")\}")
+
+
+def clean_template(v):
+    """What the filename box accepts: the known {placeholders}, plain text, '/' for sub-folders - nothing that can leave the folder."""
+    s = str(v or "").strip()[:150]
+    parts = _TPL_RE.split(s)
+    s = "".join("{" + p + "}" if i % 2 else re.sub(r'[\x00-\x1f<>:"\\|?*{}%]', "", p) for i, p in enumerate(parts))
+    segs = [x.strip() for x in s.split("/")]
+    if s.startswith("/") or any(x in ("..", ".") for x in segs):
+        return ""
+    return "/".join(x for x in segs if x)
+
+
+def _to_outtmpl(v):
+    s = clean_template(v)
+    if not s:
+        return None
+    return "".join(_TPL[p] if i % 2 else p for i, p in enumerate(_TPL_RE.split(s))) + ".%(ext)s"
+
+
+def _apply_speed_settings(opts):
+    rate = _RATE.get(str(settings.get("speed_limit", "0")))
+    if rate:
+        opts["ratelimit"] = rate
+    parts = settings.get("parallel_parts", 1)
+    if isinstance(parts, int) and 2 <= parts <= 8:
+        opts["concurrent_fragment_downloads"] = parts
+    pace = settings.get("pace", "off")
+    if pace == "balanced":
+        opts.update(sleep_interval_requests=1, sleep_interval=1, max_sleep_interval=3)
+    elif pace == "careful":
+        opts.update(sleep_interval_requests=2, sleep_interval=3, max_sleep_interval=8)
+    rc = settings.get("retry_count", 3)
+    if isinstance(rc, int) and 0 <= rc <= 10:
+        opts["retries"] = opts["fragment_retries"] = rc
+        if rc:                                              # wait longer before each new attempt (2 s, 4 s, 8 s ... max 30 s)
+            opts["retry_sleep_functions"] = {k: (lambda n: min(2 ** n, 30)) for k in ("http", "fragment", "file_access", "extractor")}
+
+
+_TRACK_PARAM = re.compile(r"^(utm_[a-z_]+|fbclid|gclid|dclid|msclkid|igshid|igsh|si|pp|feature|mc_cid|mc_eid|ref_src|"
+                          r"is_from_webapp|sender_device|sender_web_id|share_app_id|share_item_id|share_link_id|tt_from|u_code)$", re.I)
+
+
+def clean_url(url, _depth=0):
+    """Strip tracking junk (si, pp, utm_*, fbclid, gclid ...) and unwrap youtube.com/redirect links. Anything else is left alone."""
+    try:
+        if not settings.get("clean_urls", True) or not isinstance(url, str):
+            return url
+        u = urlparse(url)
+        if u.scheme not in ("http", "https") or not u.netloc:
+            return url
+        if _depth < 3 and (u.hostname or "").lower() in ("youtube.com", "www.youtube.com", "m.youtube.com") and u.path == "/redirect":
+            q = parse_qs(u.query).get("q", [""])[0]
+            if valid_http_url(q):
+                return clean_url(q, _depth + 1)
+        if not u.query:
+            return url
+        pieces = u.query.split("&")
+        kept = [p for p in pieces if not _TRACK_PARAM.match(p.split("=", 1)[0])]
+        if len(kept) == len(pieces):
+            return url
+        return u._replace(query="&".join(kept)).geturl()
+    except ValueError:
+        return url
+
+
 def build_ydl_opts(options, folder, hook, tmpl=None, cookiefile=None, ig=False, ig_sub="posts"):
     """Translate UI options into a yt-dlp options dict."""
     from yt_dlp.utils import DateRange, download_range_func, match_filter_func
@@ -626,19 +701,24 @@ def build_ydl_opts(options, folder, hook, tmpl=None, cookiefile=None, ig=False, 
     if o["kind"] in ("gif", "sticker"):               # these only need the picture, no subs/tags/etc.
         for k in ("subs", "autosubs", "embed_subs", "thumb", "embed_thumb", "meta", "sponsor", "desc"):
             o[k] = False
+    if o["kind"] == "subs":                           # subtitles only: no video is fetched, so nothing to embed / tag / cut
+        for k in ("embed_subs", "thumb", "embed_thumb", "meta", "sponsor"):
+            o[k] = False
     if tmpl is None:
         who = "%(channel,uploader_id,uploader|Unknown).60B/" if ig else "%(uploader,channel,creator|Unknown).60B/"
         creator = who if settings.get("creator_folders", True) else ""
-        tmpl = creator + "%(title).120B [%(id)s].%(ext)s"
+        nt = None if ig else _to_outtmpl(settings.get("name_template", ""))      # your own file-name template (Settings -> Downloads)
+        tmpl = creator + (nt or "%(title).120B [%(id)s].%(ext)s")
         if ig and settings.get("ig_organize", True):          # instagram/<user>/<post date>/<type>/title [id].ext
             tmpl = who + f"%(upload_date>%Y-%m-%d|unknown-date)s/{ig_sub}/" + "%(title).120B [%(id)s].%(ext)s"
         if o["playlist"] == "all":
-            tmpl = "%(playlist_title|).80B/%(playlist_index|)s %(title).100B [%(id)s].%(ext)s"
+            tmpl = "%(playlist_title|).80B/" + (nt or "%(playlist_index|)s %(title).100B [%(id)s].%(ext)s")
     opts = {"outtmpl": str(folder / tmpl), "quiet": True, "no_warnings": True, "noprogress": True,
             "socket_timeout": 20, "retries": 3, "fragment_retries": 3, "progress_hooks": [hook],
             "noplaylist": o["playlist"] != "all"}
     if cookiefile:
         opts["cookiefile"] = cookiefile
+    _apply_speed_settings(opts)
     pps = []
 
     # --- what to get ---------------------------------------------------------
@@ -648,6 +728,8 @@ def build_ydl_opts(options, folder, hook, tmpl=None, cookiefile=None, ig=False, 
         if o["audio_fmt"] in ("mp3", "m4a", "opus"):
             pp["preferredquality"] = o["abr"]
         pps.append(pp)
+    elif o["kind"] == "subs":
+        opts["skip_download"] = True
     elif o["kind"] in ("gif", "sticker"):
         opts["format"] = "bv*[height<=720]/b[height<=720]/bv*/b"      # video only, small is fine
         opts["merge_output_format"] = "mp4"
@@ -668,15 +750,18 @@ def build_ydl_opts(options, folder, hook, tmpl=None, cookiefile=None, ig=False, 
                 {"key": "ModifyChapters", "remove_sponsor_segments": cats, "remove_chapters_patterns": [],
                  "remove_ranges": [], "sponsorblock_chapter_title": "[SponsorBlock]: %(category_names)l",
                  "force_keyframes": False}]
-    if o["subs"] or o["autosubs"]:
-        opts.update(writesubtitles=o["subs"], writeautomaticsub=o["autosubs"],
+    if o["subs"] or o["autosubs"] or o["kind"] == "subs":
+        embed = o["embed_subs"] and o["kind"] == "video"
+        fmt = "srt" if embed else o["sub_fmt"]                      # embedding needs srt; otherwise your chosen format
+        opts.update(writesubtitles=o["subs"] or o["kind"] == "subs", writeautomaticsub=o["autosubs"],
                     subtitleslangs=[x for x in o["sub_langs"].split(",") if x],
-                    subtitlesformat="srt/best")
-        if o["embed_subs"] and o["kind"] == "video":
-            pps += [{"key": "FFmpegSubtitlesConvertor", "format": "srt"}, {"key": "FFmpegEmbedSubtitle"}]
+                    subtitlesformat=f"{fmt}/best")
+        pps.append({"key": "FFmpegSubtitlesConvertor", "format": fmt})
+        if embed:
+            pps.append({"key": "FFmpegEmbedSubtitle"})
     if o["meta"]:
         pps.append({"key": "FFmpegMetadata", "add_chapters": True, "add_metadata": True})
-    if (o["thumb"] or o["embed_thumb"]) and o["kind"] != "image":
+    if (o["thumb"] or o["embed_thumb"]) and o["kind"] not in ("image", "subs"):
         opts["writethumbnail"] = True
         pps.append({"key": "FFmpegThumbnailsConvertor", "format": "jpg", "when": "before_dl"})
         if o["embed_thumb"]:
@@ -1047,23 +1132,25 @@ def ytdlp_worker(job, url, category, options, cancel):
             main, side = job_files(info, folder)
             files = sorted(set(main) | set(side))
             if not files:
+                if o["kind"] == "subs":
+                    return finish_err(job, "No subtitles found for the languages you chose. Try another language, or tick “Auto-captions”.")
                 return finish_err(job, "No video matched your filters." if has_filters(o)
                                   else "Nothing was saved - the site returned no downloadable media.")
             note = None
             # "real" = this job fetched something (or wrote a cover). Otherwise yt-dlp found it already on disk.
-            real = fetched["n"] > 0 or o["kind"] == "image"
+            real = fetched["n"] > 0 or o["kind"] in ("image", "subs")
             fresh = fresh_since(folder, files, started) if real else []
             if not fresh:
                 note = "Already downloaded - the file is ready (tick “Re-download if it exists” to fetch it again)."
             # effects / GIF / sticker only touch THIS job's own media files
-            targets = main if o["kind"] != "image" else [f for f in side if f.lower().endswith(IMG_EXT)]
+            targets = main if o["kind"] not in ("image", "subs") else ([f for f in side if f.lower().endswith(IMG_EXT)] if o["kind"] == "image" else [])
             others = [f for f in files if f not in targets]
-            out, fxnote = postprocess_media(folder, targets, o, job)
+            out, fxnote = postprocess_media(folder, targets, o, job) if targets else ([], None)
             made_now = set(out) - set(targets)             # files created by the effects step
             files = sorted(set(others) | set(out))
             note = fxnote or note
             fresh_now = (set(fresh) & set(files)) | made_now
-            auto = not o["name"] and settings.get("auto_name", "date") == "date"     # nothing typed: date + number
+            auto = not o["name"] and settings.get("auto_name", "date") == "date" and o["kind"] != "subs"     # nothing typed: date + number (subtitles keep ".en")
             m = rename_files(folder, sorted(set(files) & fresh_now), o, auto)
             if m:
                 files = sorted({m.get(f, f) for f in files}); fresh_now = {m.get(f, f) for f in fresh_now}
@@ -1154,6 +1241,7 @@ def _story_details(snaps):
         prev = urls.get("mediaPreviewUrl")
         prev = prev.get("value") if isinstance(prev, dict) else prev
         media = urls.get("mediaUrl")
+        media = media.get("value") if isinstance(media, dict) else media
         mtype = sn.get("snapMediaType")
         kind = "video" if mtype == 1 else "image" if mtype == 0 else "unknown"
         if not (isinstance(prev, str) and prev.startswith("https://")):
@@ -1161,6 +1249,7 @@ def _story_details(snaps):
         ts = sn.get("timestampInSec")
         ts = ts.get("value") if isinstance(ts, dict) else ts
         out.append({"id": sid, "index": len(out) + 1, "kind": kind, "preview": prev,
+                    "media": media if isinstance(media, str) and media.startswith("https://") else None,   # server side only: used to fetch JUST the picked stories
                     "time": int(ts) if str(ts).isdigit() else None})
     return out
 
@@ -1207,6 +1296,110 @@ def downloaded_ids(ids, names):
     """Which story ids already appear in saved file names (None-safe)."""
     blob = "\n".join(names)
     return {i for i in ids if i in blob}
+
+
+_SNAP_EXT = {"video/mp4": "mp4", "video/quicktime": "mov", "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
+SNAP_MAX_BYTES = 800 * 1024 * 1024
+
+
+def _snap_media_ok(url):
+    """Story files are only fetched from Snapchat's own hosts, over https."""
+    try:
+        u = urlparse(url)
+    except ValueError:
+        return False
+    return u.scheme == "https" and host_is(u.hostname or "", *THUMB_HOSTS)
+
+
+def _snap_fetch_story(dest, story, cancel, tick=None):
+    """Save ONE story from its own media link into dest. Returns the final Path."""
+    url = story["media"]
+    if not _snap_media_ok(url):
+        raise ValueError("the story link is not on a Snapchat host")
+    req = urllib.request.Request(url, headers={"User-Agent": _UA})
+    with urllib.request.urlopen(req, timeout=25) as r:
+        if not _snap_media_ok(r.geturl()):
+            raise ValueError("the story link redirected away from Snapchat")
+        ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if not (ctype.startswith(("video/", "image/")) or ctype == "application/octet-stream"):
+            raise ValueError("that link is not a picture or video")
+        ext = _SNAP_EXT.get(ctype) or {"video": "mp4", "image": "jpg"}.get(story.get("kind"))
+        if not ext:
+            raise ValueError("unknown media type")
+        total = int(r.headers.get("Content-Length") or 0)
+        sid = re.sub(r"[^A-Za-z0-9._=\-]", "_", story["id"])[:120]     # the id stays in the name: that is how already-saved stories are recognised
+        name = f"{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime(story.get('time') or time.time()))}_{sid}.{ext}"
+        final, part, got = dest / name, dest / (name + ".part"), 0
+        try:
+            with open(part, "wb") as f:
+                while True:
+                    if cancel.is_set():
+                        raise DownloadCancelled("Cancelled by user")
+                    chunk = r.read(256 * 1024)
+                    if not chunk:
+                        break
+                    got += len(chunk)
+                    if got > SNAP_MAX_BYTES:
+                        raise ValueError("the file is too large")
+                    f.write(chunk)
+                    if tick and total:
+                        tick(got / total)
+            if got < 512:
+                raise ValueError("the download was empty")
+            os.replace(part, final)
+        finally:
+            part.unlink(missing_ok=True)
+    return final
+
+
+def _snapchat_direct(job, username, cancel, options, picks, folder, done0, log, total_online):
+    """
+    Download ONLY the ticked stories, each straight from its own link. No other story of this user is fetched
+    (the older snapchat-dl route fetches everything in order and deletes the extras afterwards).
+    """
+    dest = user_dir(folder, username) or (folder / username)
+    dest.mkdir(parents=True, exist_ok=True)
+    todo = [p for p in picks if p["id"] not in done0]
+    new, failed = [], []
+    log.append(f"[hub] fetching exactly {len(todo)} picked stories - nothing else is downloaded")
+    for n, st in enumerate(todo, 1):
+        if cancel.is_set():
+            break
+        base = 5 + (n - 1) / len(todo) * 88
+        update(job, message=f"Downloading story {n} of {len(todo)}…", progress=round(base, 1),
+               speed="", eta="")
+        try:
+            p = _snap_fetch_story(dest, st, cancel, lambda fr, b=base, w=88 / len(todo): update(job, progress=round(b + fr * w, 1)))
+            new.append(f"{dest.name}/{p.name}")
+        except DownloadCancelled:
+            break
+        except (OSError, ValueError) as exc:
+            failed.append(st["id"])
+            log.append(f"[hub] story {st['id']} failed: {exc}")
+    update(job, log="\n".join(log[-60:]))
+    if cancel.is_set():
+        return finish_err(job, "Cancelled by user" + (f" - {len(new)} stories had already been saved." if new else ""))
+    if not new:
+        return finish_err(job, "None of the picked stories could be downloaded (they may have just expired). Open the list again.")
+    note = f"Downloaded {len(new)} picked stor{'y' if len(new) == 1 else 'ies'}"
+    if done0:
+        note += f" · {len(done0)} already saved"
+    if failed:
+        note += f" · {len(failed)} could not be fetched"
+    others = total_online - len(picks)
+    if others > 0:
+        note += f" · the other {others} were not touched"
+    o = dict(sanitize_options(options), kind="video")
+    if has_fx(o):
+        update(job, message="Applying effects…", progress=94)
+        new, fxnote = postprocess_media(folder, new, o, job)
+        note += f" · {fxnote}" if fxnote else ""
+    if o["name"]:
+        m = rename_files(folder, new, o)
+        if m:
+            new = sorted({m.get(f, f) for f in new})
+            note += " · saved as " + Path(sorted(m.values())[0]).name
+    return finish_ok(job, new, note, fresh=new)
 
 
 def snapchat_worker(job, username, cancel, options=None, only=None):
@@ -1266,6 +1459,12 @@ def _snapchat_run(job, username, cancel, options=None, only=None):
         log.append(f"[hub] {len(done0)} of {expected} already on disk")
     else:
         update(job, message=f"Fetching stories for @{username}…", progress=5)
+    if only is not None and info:                       # preferred route: fetch ONLY the picked stories from their own links
+        by_id = {s_["id"]: s_ for s_ in (info.get("stories") or [])}
+        picks = [by_id.get(i) for i in ids]
+        if picks and all(p and p.get("media") for p in picks):
+            return _snapchat_direct(job, username, cancel, options, picks, folder, done0, log, total or len(all_ids))
+        log.append("[hub] no direct links for these stories - using snapchat-dl instead")
     hard_limit = min(SNAP_HARD_TIMEOUT, max(300, (total or expected) * 30)) if expected else SNAP_HARD_TIMEOUT
 
     env = {**os.environ, "PYTHONUNBUFFERED": "1", "NO_COLOR": "1"}
@@ -1710,7 +1909,7 @@ def _ig_preview(url, ig):
 @app.route("/preview", methods=["POST"])
 def preview():
     """Title + thumbnail without downloading (time-limited)."""
-    url = str(json_body().get("url") or "").strip()
+    url = clean_url(str(json_body().get("url") or "").strip())
     if not url:
         return jsonify(success=False, error="No URL provided"), 400
     if not valid_http_url(url):
@@ -1740,7 +1939,7 @@ def preview():
                        thumbnail=info.get("thumbnail", ""),
                        uploader=info.get("uploader") or info.get("channel") or "",
                        duration=info.get("duration"), views=info.get("view_count"),
-                       upload_date=info.get("upload_date"),
+                       upload_date=info.get("upload_date"), quality=_quality_summary(info),
                        site=info.get("extractor_key", ""), category=detect_category(url),
                        channel_url="" if igx else (info.get("channel_url") or info.get("uploader_url") or ""),
                        **extra)
@@ -1758,6 +1957,77 @@ def preview():
                 return jsonify(success=True, title="TikTok link", thumbnail="", uploader="", duration=None, views=None, upload_date=None,
                                site="TikTok", category="tiktok", channel_url="")
         return jsonify(success=False, error=msg[:300])
+
+
+def _quality_summary(info):
+    """Best picture this link offers: {height, fps, hdr} (shown as '4K · 60 fps · HDR' on the preview card)."""
+    try:
+        fm = [f for f in (info.get("formats") or []) if isinstance(f, dict) and f.get("vcodec") not in (None, "none")]
+        hs = [f["height"] for f in fm if isinstance(f.get("height"), int)]
+        if not hs:
+            return None
+        top = max(hs)
+        fps = max([f.get("fps") or 0 for f in fm if f.get("height") == top] or [0])
+        return {"height": top, "fps": int(round(fps)),
+                "hdr": any(str(f.get("dynamic_range") or "").upper().startswith("HDR") for f in fm)}
+    except Exception:  # noqa: BLE001 - a missing badge is better than a failed preview
+        return None
+
+
+PL_CACHE = {}
+_CHANNEL_RE = re.compile(r"^(https?://(?:www\.|m\.)?youtube\.com/(?:@[\w.\-]+|channel/[\w\-]+|c/[\w\-]+|user/[\w\-]+))/?$", re.I)
+
+
+def fetch_playlist(url, limit=300):
+    """The videos of a playlist / channel / profile WITHOUT downloading anything (fast 'flat' listing)."""
+    m = _CHANNEL_RE.match(url)
+    if m:
+        url = m.group(1) + "/videos"                    # a bare channel link lists its tabs; we want the videos
+    with cookie_ctx(False) as cf:
+        opts = {"skip_download": True, "quiet": True, "no_warnings": True, "socket_timeout": 20,
+                "extract_flat": "in_playlist", "playlistend": limit, "noplaylist": False}
+        if cf:
+            opts["cookiefile"] = cf
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    entries = []
+    for e in (info.get("entries") or []):
+        if not isinstance(e, dict):
+            continue
+        u = e.get("url") or e.get("webpage_url")
+        if isinstance(u, str) and not u.startswith("http") and str(e.get("ie_key") or "").lower() == "youtube" and e.get("id"):
+            u = f"https://www.youtube.com/watch?v={e['id']}"
+        if not isinstance(u, str) or not valid_http_url(u):
+            continue
+        th = e.get("thumbnail") or next((t.get("url") for t in reversed(e.get("thumbnails") or []) if isinstance(t, dict) and t.get("url")), None)
+        entries.append({"index": len(entries) + 1, "id": str(e.get("id") or len(entries) + 1)[:60],
+                        "title": str(e.get("title") or f"Video {len(entries) + 1}")[:160], "duration": e.get("duration"),
+                        "url": u, "thumb": th if isinstance(th, str) and th.startswith("https://") else ""})
+    return {"title": str(info.get("title") or "Playlist")[:120], "uploader": str(info.get("uploader") or info.get("channel") or "")[:80],
+            "total": info.get("playlist_count"), "entries": entries}
+
+
+@app.route("/playlist-info", methods=["POST"])
+def playlist_info():
+    """List a playlist / channel for the 'Choose videos' picker."""
+    url = clean_url(str(json_body().get("url") or "").strip())
+    if not valid_http_url(url):
+        return jsonify(success=False, error="That doesn't look like a valid link."), 400
+    hit = PL_CACHE.get(url)
+    if hit and time.time() - hit[0] < 600:
+        return jsonify(success=True, **hit[1])
+    try:
+        data = preview_pool.submit(fetch_playlist, url).result(timeout=70)
+    except FutTimeout:
+        return jsonify(success=False, error="Reading the list took too long. Try again, or download without choosing."), 504
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(success=False, error=last_line(exc, "Could not read this list")[:300])
+    if len(data["entries"]) < 1:
+        return jsonify(success=False, error="No videos were found in this link.")
+    if len(PL_CACHE) > 30:
+        PL_CACHE.clear()
+    PL_CACHE[url] = (time.time(), data)
+    return jsonify(success=True, **data)
 
 
 @app.route("/snap-info")
@@ -1876,6 +2146,7 @@ def enqueue(action, target, quality="best", batch=None, options=None, only=None)
         fn, args, category = snapchat_worker, (username, cancel, options, picked), "snapchat"
         label = f"@{username}" + (f" · {len(picked)} picked" if picked else "")
     elif action == "url":
+        target = clean_url(target)
         if not valid_http_url(target):
             return None, "Please enter a valid http(s) link."
         category = detect_category(target)
@@ -1895,7 +2166,7 @@ def enqueue(action, target, quality="best", batch=None, options=None, only=None)
            "finished": None, "batch": batch}
     with lock:
         jobs[job["id"]], cancels[job["id"]] = job, cancel
-    pool.submit(_run_safely, fn, job, *args)
+    queue_add(job, fn, args)
     return job, None
 
 
@@ -1947,6 +2218,117 @@ def _run_safely(fn, job, *args):
         finish_err(job, f"Unexpected error: {exc}")
     if job["status"] in ("queued", "running"):          # a worker returned without finishing: never leave it hanging
         finish_err(job, "The download ended without a result.")
+
+
+# ---- download queue: MAX_WORKERS run at once, the rest wait in an order you can change ----
+# A queued job can be moved or held; a running job can be paused (stopped now, resumed later -
+# yt-dlp continues its .part file and Snapchat/Instagram skip what is already saved).
+qcond = threading.Condition()
+pending = []                 # job ids waiting, in the order they will start
+tasks = {}                   # job id -> (worker fn, args) - kept until the job really ends, so Resume can rerun it
+
+
+def queue_add(job, fn, args, front=False):
+    with qcond:
+        tasks[job["id"]] = (fn, args)
+        if job["id"] not in pending:
+            pending.insert(0, job["id"]) if front else pending.append(job["id"])
+        qcond.notify()
+
+
+def _queue_worker():
+    while True:
+        with qcond:
+            while True:
+                with lock:
+                    jid = next((i for i in pending if (jobs.get(i) or {}).get("status") == "queued"), None)
+                if jid:
+                    pending.remove(jid)
+                    fn, args = tasks.get(jid, (None, ()))
+                    break
+                qcond.wait(timeout=30)
+        job = jobs.get(jid)
+        if not job or fn is None:
+            continue
+        _run_safely(fn, job, *args)
+        if job.get("status") != "paused":
+            with qcond:
+                tasks.pop(jid, None)
+
+
+for _n in range(MAX_WORKERS):
+    threading.Thread(target=_queue_worker, daemon=True, name=f"dlq{_n}").start()
+
+
+def queue_view(ids):
+    """The jobs you know about (by id), with their place in the line."""
+    with qcond, lock:
+        order = {jid: n + 1 for n, jid in enumerate(i for i in pending if (jobs.get(i) or {}).get("status") in ("queued", "paused"))}
+        out = []
+        for i in ids:
+            j = jobs.get(i)
+            if j and j["status"] in ("queued", "running", "paused"):
+                out.append(dict(j, position=order.get(i), can_pause=i in tasks))
+    rank = {"running": 0, "queued": 1, "paused": 2}
+    return sorted(out, key=lambda j: (rank[j["status"]], j.get("position") or 0, j["created"]))
+
+
+@app.route("/queue")
+def queue_list():
+    ids = [i for i in (request.args.get("ids") or "").split(",") if i][:200]
+    return jsonify(success=True, jobs=queue_view(ids), slots=MAX_WORKERS)
+
+
+@app.route("/queue/<job_id>/<action>", methods=["POST"])
+def queue_action(job_id, action):
+    with lock:
+        job = jobs.get(job_id)
+    if not job or action not in ("pause", "resume", "up", "down", "top", "cancel"):
+        return jsonify(success=False, message="Not found."), 404
+    st = job["status"]
+    if action == "cancel":
+        if st in ("queued", "paused"):                       # not running: end it now instead of waiting for a free slot
+            with qcond:
+                if job_id in pending:
+                    pending.remove(job_id)
+                tasks.pop(job_id, None)
+            update(job, pausing=False)
+            finish_err(job, "Cancelled by user")
+        else:
+            ev = cancels.get(job_id)
+            ev and ev.set()
+        return jsonify(success=True)
+    if action == "pause":
+        if st == "queued":
+            update(job, status="paused", message="On hold - press Resume to put it back in line")
+        elif st == "running":
+            if job_id not in tasks:
+                return jsonify(success=False, message="This kind of job cannot be paused - cancel it instead."), 400
+            update(job, pausing=True, message="Pausing…")
+            ev = cancels.get(job_id)
+            ev and ev.set()
+        save_jobs()
+        return jsonify(success=True)
+    if action == "resume":
+        if st != "paused":
+            return jsonify(success=False, message="It is not paused."), 400
+        ev = cancels.get(job_id)
+        ev and ev.clear()
+        update(job, status="queued", message="Waiting in queue…")
+        with qcond:
+            if job_id not in pending:
+                pending.append(job_id)
+            qcond.notify()
+        save_jobs()
+        return jsonify(success=True)
+    with qcond:                                              # up / down / top: only among the jobs still waiting
+        if job_id not in pending:
+            return jsonify(success=False, message="Only waiting downloads can be moved."), 400
+        i = pending.index(job_id)
+        pending.pop(i)
+        j = 0 if action == "top" else max(0, i - 1) if action == "up" else min(len(pending), i + 1)
+        pending.insert(j, job_id)
+    return jsonify(success=True)
 
 
 @app.route("/job/<job_id>")
@@ -2318,15 +2700,71 @@ def run_watch(wid):
             _save(WATCH_FILE, watches)
     if new:
         try:
-            title, body = describe_new(w, new)
-            notify(title, body, ["eyes"])
+            if settings.get("digest") == "daily":
+                digest_add(w, new)
+            else:
+                title, body = describe_new(w, new)
+                notify(title, body, ["eyes"])
         except Exception:  # noqa: BLE001
             app.logger.exception("Could not build the notification")
+
+
+# ---- daily digest: one alert a day instead of one per account ----
+DIGEST_FILE = DATA_DIR / "digest.json"
+dlock = threading.Lock()
+
+
+def digest_add(w, new):
+    low = [n.lower() for n in new]
+    kinds = {"video": sum(l.endswith(VIDEO_EXT) for l in low), "photo": sum(l.endswith(IMG_EXT) for l in low)}
+    with dlock:
+        d = _load(DIGEST_FILE, {})
+        e = d.setdefault("pending", {}).setdefault(w["id"], {"label": w["label"], "count": 0, "video": 0, "photo": 0})
+        e["label"] = w["label"]
+        e["count"] += len(new)
+        for k, v in kinds.items():
+            e[k] += v
+        _save(DIGEST_FILE, d)
+
+
+def digest_text(pending):
+    rows = sorted(pending.values(), key=lambda e: -e["count"])
+    total = sum(e["count"] for e in rows)
+    title = f"👁 Daily digest: {_plural(total, 'new post')} from {_plural(len(rows), 'account')}"
+    lines = []
+    for e in rows[:8]:
+        bits = [p for p in (_plural(e["video"], "video") if e["video"] else "", _plural(e["photo"], "photo") if e["photo"] else "") if p]
+        lines.append(f"• {e['label']}: {e['count']}" + (f" ({', '.join(bits)})" if bits else ""))
+    if len(rows) > 8:
+        lines.append(f"+ {len(rows) - 8} more accounts")
+    return title, "\n".join(lines)
+
+
+def digest_tick(force=False):
+    """Send the digest once a day at the chosen hour (server's local time). Returns what was sent, or None."""
+    if settings.get("digest") != "daily" and not force:
+        return None
+    now = time.localtime()
+    today = time.strftime("%Y-%m-%d", now)
+    with dlock:
+        d = _load(DIGEST_FILE, {})
+        due = force or (now.tm_hour >= int(settings.get("digest_hour", 20)) and d.get("sent_on") != today)
+        if not due or not d.get("pending"):
+            return None
+        title, body = digest_text(d["pending"])
+        d.update(pending={}, sent_on=today)
+        _save(DIGEST_FILE, d)
+    notify(title, body, ["eyes"])
+    return title
 
 
 def scheduler_loop():
     while True:
         time.sleep(15)
+        try:
+            digest_tick()
+        except Exception:  # noqa: BLE001
+            app.logger.exception("Digest error")
         try:
             now = time.time()
             with wlock:
@@ -2434,6 +2872,34 @@ def settings_api():
             settings["notify_downloads"] = bool(d["notify_downloads"])
         if "prefer_h264" in d:
             settings["prefer_h264"] = bool(d["prefer_h264"])
+        if "name_template" in d:
+            settings["name_template"] = clean_template(d["name_template"])
+        if d.get("speed_limit") in ("0", "500K", "1M", "2M", "5M", "10M"):
+            settings["speed_limit"] = d["speed_limit"]
+        if "parallel_parts" in d:
+            try:
+                settings["parallel_parts"] = max(1, min(8, int(d["parallel_parts"])))
+            except (TypeError, ValueError):
+                return jsonify(success=False, message="Parallel parts must be a number from 1 to 8."), 400
+        if d.get("pace") in ("off", "balanced", "careful"):
+            settings["pace"] = d["pace"]
+        if "retry_count" in d:
+            try:
+                settings["retry_count"] = max(0, min(10, int(d["retry_count"])))
+            except (TypeError, ValueError):
+                return jsonify(success=False, message="Retries must be a number from 0 to 10."), 400
+        if "clean_urls" in d:
+            settings["clean_urls"] = bool(d["clean_urls"])
+        if d.get("digest") in ("off", "daily"):
+            settings["digest"] = d["digest"]
+            if d["digest"] == "off":                      # going back to instant alerts: don't keep a stale backlog
+                with dlock:
+                    _save(DIGEST_FILE, {"pending": {}})
+        if "digest_hour" in d:
+            try:
+                settings["digest_hour"] = max(0, min(23, int(d["digest_hour"])))
+            except (TypeError, ValueError):
+                return jsonify(success=False, message="Digest hour must be 0-23."), 400
         if "ig_cap" in d:
             try:
                 settings["ig_cap"] = max(1, min(500, int(d["ig_cap"])))
@@ -2443,7 +2909,20 @@ def settings_api():
     return jsonify(success=True, ntfy=settings.get("ntfy", ""),
                    creator_folders=settings.get("creator_folders", True), ig_organize=settings.get("ig_organize", True), auto_name=settings.get("auto_name", "date"), prefer_h264=settings.get("prefer_h264", True),
                    notify_downloads=settings.get("notify_downloads", False),
+                   name_template=settings.get("name_template", ""), speed_limit=settings.get("speed_limit", "0"),
+                   parallel_parts=settings.get("parallel_parts", 1), pace=settings.get("pace", "off"),
+                   retry_count=settings.get("retry_count", 3), clean_urls=settings.get("clean_urls", True),
+                   digest=settings.get("digest", "off"), digest_hour=settings.get("digest_hour", 20),
+                   digest_waiting=sum(e.get("count", 0) for e in _load(DIGEST_FILE, {}).get("pending", {}).values()),
                    ig_cap=ig_cap())
+
+
+@app.route("/digest/send", methods=["POST"])
+def digest_send_now():
+    if not (settings.get("ntfy") or "").strip():
+        return jsonify(success=False, message="Set an ntfy topic first."), 400
+    sent = digest_tick(force=True)
+    return jsonify(success=True, message=sent or "Nothing new is waiting for the digest.")
 
 
 # ---- Instagram login card ------------------------------------------------------
@@ -2609,7 +3088,92 @@ def auto_tags(rel, is_dir=False):
             t.add(seg[:7])
     if not is_dir and file_kind(parts[-1]) != "other":
         t.add(file_kind(parts[-1]))
+        t.update(smart_tags(rel))
     return t
+
+
+# ---- smart tags: read from the media itself (ffprobe), cached in meta.json ----
+META_FILE = DATA_DIR / "meta.json"
+SMART_TAGS = ("vertical", "horizontal", "square", "4k", "hd", "short", "long")
+media_meta = {}                        # "category/…/file" -> {"s": size, "m": mtime, "w": px, "h": px, "d": seconds}
+mlock = threading.Lock()
+
+
+def smart_tags(rel):
+    with mlock:
+        m = media_meta.get(rel)
+    if not m:
+        return set()
+    t, w, h, d = set(), m.get("w") or 0, m.get("h") or 0, m.get("d") or 0
+    if w and h:
+        r = w / h
+        t.add("square" if 0.9 <= r <= 1.1 else "vertical" if r < 1 else "horizontal")
+        if min(w, h) >= 2000:
+            t.add("4k")
+        elif min(w, h) >= 720:
+            t.add("hd")
+    if d and file_kind(rel) in ("video", "audio"):
+        if d < 60:
+            t.add("short")
+        elif d >= 20 * 60:
+            t.add("long")
+    return t
+
+
+def _probe(path):
+    ff = shutil.which("ffprobe")
+    if not ff:
+        return None
+    try:
+        r = subprocess.run([ff, "-v", "error", "-show_entries", "stream=codec_type,width,height:format=duration",
+                            "-of", "json", str(path)], capture_output=True, text=True, timeout=30)
+        data = json.loads(r.stdout or "{}")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {}
+    v = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), {})
+    try:
+        dur = float((data.get("format") or {}).get("duration") or 0)
+    except (TypeError, ValueError):
+        dur = 0
+    return {"w": int(v.get("width") or 0), "h": int(v.get("height") or 0), "d": round(dur, 1)}
+
+
+def meta_loop():
+    """Quietly probe new files in the background (a few per pass) so tags appear without slowing anything down."""
+    with mlock:
+        media_meta.update(_load(META_FILE, {}))
+    while True:
+        time.sleep(20)
+        if not shutil.which("ffprobe"):
+            continue
+        try:
+            files = fs_index()
+            live = {rel for rel, _s, _m in files}
+            changed, done = False, 0
+            for rel, size, mt in files:
+                if file_kind(rel) == "other":
+                    continue
+                with mlock:
+                    m = media_meta.get(rel)
+                if m and m.get("s") == size and m.get("m") == int(mt):
+                    continue
+                info = _probe(BASE_DIR / rel)
+                if info is None:
+                    break
+                with mlock:
+                    media_meta[rel] = dict(info, s=size, m=int(mt))
+                changed, done = True, done + 1
+                if done >= 40:
+                    break
+            with mlock:
+                for gone in [k for k in media_meta if k not in live]:      # forget deleted/moved files
+                    media_meta.pop(gone)
+                    changed = True
+                snap = dict(media_meta) if changed else None
+            if snap is not None:
+                _save(META_FILE, snap)
+        except Exception:  # noqa: BLE001
+            app.logger.exception("Media probe pass failed")
 
 
 def manual_for(rel):
@@ -2632,6 +3196,8 @@ def tag_group(t):
         return "sites"
     if t in ("video", "photo", "audio") or t in TYPE_FOLDERS:
         return "types"
+    if t in SMART_TAGS:
+        return "smart"
     return "dates" if re.fullmatch(r"\d{4}-\d{2}", t) else "custom"
 
 
@@ -2752,6 +3318,148 @@ def fs_tags():
                   key=lambda x: (-x["count"], x["name"]))
     return jsonify(success=True, tags=tags, files=len(fs_index()), total_h=human(total),
                    free_h=human(shutil.disk_usage(BASE_DIR).free))
+
+
+# ---- duplicates, storage dashboard, cleanup ----
+_hash_cache = {}                       # (rel, size, mtime) -> quick content hash
+_ID_RE = re.compile(r"\[([A-Za-z0-9_-]{6,})\]$")
+SIDECAR_EXT = (".description", ".info.json", ".live_chat.json")
+PARTIAL_MIN_AGE = 3 * 3600             # leftovers older than this are not an active download any more
+
+
+def _quick_hash(path, size):
+    """Size + first, middle and last MB: identical for identical files, fast even for 4K videos."""
+    h = hashlib.blake2b(str(size).encode(), digest_size=16)
+    with open(path, "rb") as f:
+        if size <= 3 << 20:
+            h.update(f.read())
+        else:
+            for pos in (0, size // 2, size - (1 << 20)):
+                f.seek(pos)
+                h.update(f.read(1 << 20))
+    return h.hexdigest()
+
+
+def find_duplicates():
+    """Groups of the same media saved more than once. Oldest copy first (that is the one cleanup keeps)."""
+    by_size, by_id = {}, {}
+    for rel, size, mt in fs_index():
+        kind = file_kind(rel)
+        if kind == "other" or size < 1024:
+            continue
+        by_size.setdefault(size, []).append((rel, size, mt))
+        m = _ID_RE.search(Path(rel).stem)
+        if m and kind in ("video", "audio"):
+            by_id.setdefault((m.group(1), kind), []).append((rel, size, mt))
+    groups, seen = [], set()
+    for same in by_size.values():
+        if len(same) < 2:
+            continue
+        by_hash = {}
+        for rel, size, mt in same:
+            key = (rel, size, int(mt))
+            if key not in _hash_cache:
+                try:
+                    _hash_cache[key] = _quick_hash(BASE_DIR / rel, size)
+                except OSError:
+                    continue
+            by_hash.setdefault(_hash_cache[key], []).append((rel, size, mt))
+        for g in by_hash.values():
+            if len(g) > 1:
+                groups.append(("identical", g))
+                seen.update(r for r, _s, _m in g)
+    for (vid, _k), g in by_id.items():                 # same video id, different file (e.g. 720p and 1080p)
+        g = [x for x in g if x[0] not in seen]
+        if len(g) > 1:
+            groups.append(("same video", g))
+    out = []
+    for reason, g in groups:
+        g = sorted(g, key=lambda x: x[2])
+        wasted = sum(s for _r, s, _m in g[1:])
+        out.append({"reason": reason, "wasted": wasted, "wasted_h": human(wasted),
+                    "items": [_item(r, s, m, False) for r, s, m in g]})
+    return sorted(out, key=lambda x: -x["wasted"])
+
+
+def _leftovers():
+    """Files nobody needs: unfinished downloads (old .part files) and yt-dlp's info/description side files."""
+    now, parts, sides = time.time(), [], []
+    for cat in CATEGORIES:
+        for dp, _dn, fns in os.walk(BASE_DIR / cat):
+            for fn in fns:
+                fp = os.path.join(dp, fn)
+                try:
+                    st = os.stat(fp)
+                except OSError:
+                    continue
+                rel = Path(fp).relative_to(BASE_DIR).as_posix()
+                if is_partial(fn) and now - st.st_mtime > PARTIAL_MIN_AGE:
+                    parts.append((rel, st.st_size))
+                elif fn.lower().endswith(SIDECAR_EXT):
+                    sides.append((rel, st.st_size))
+    return parts, sides
+
+
+@app.route("/fs/dupes")
+def fs_dupes():
+    groups = find_duplicates()
+    wasted = sum(g["wasted"] for g in groups)
+    return jsonify(success=True, groups=groups, wasted_h=human(wasted), extra=sum(len(g["items"]) - 1 for g in groups))
+
+
+@app.route("/fs/storage")
+def fs_storage():
+    sites, users, kinds, months, total = {}, {}, {}, {}, 0
+    files = fs_index()
+    for rel, size, mt in files:
+        total += size
+        parts = rel.split("/")
+        sites[parts[0]] = sites.get(parts[0], 0) + size
+        if len(parts) >= 3:
+            k = parts[0] + "/" + parts[1]
+            users[k] = users.get(k, 0) + size
+        kd = file_kind(rel)
+        kinds[kd] = kinds.get(kd, 0) + size
+        mo = time.strftime("%Y-%m", time.localtime(mt))
+        months[mo] = months.get(mo, 0) + size
+    du = shutil.disk_usage(BASE_DIR)
+    parts, sides = _leftovers()
+    ident = [g for g in find_duplicates() if g["reason"] == "identical"]       # what "Clean up" removes
+    rows = lambda d, n=None: [{"name": k, "size": v, "size_h": human(v)} for k, v in sorted(d.items(), key=lambda x: -x[1])[:n]]
+    return jsonify(success=True, total=total, total_h=human(total), files=len(files),
+                   disk={"total": du.total, "used": du.used, "free": du.free, "total_h": human(du.total), "free_h": human(du.free)},
+                   sites=rows(sites), users=rows(users, 12), kinds=rows(kinds),
+                   months=[{"name": k, "size": v, "size_h": human(v)} for k, v in sorted(months.items())[-12:]],
+                   cleanup={"partials": {"count": len(parts), "size_h": human(sum(s for _r, s in parts))},
+                            "sidecars": {"count": len(sides), "size_h": human(sum(s for _r, s in sides))},
+                            "dupes": {"count": sum(len(g["items"]) - 1 for g in ident), "size_h": human(sum(g["wasted"] for g in ident))}})
+
+
+@app.route("/fs/cleanup", methods=["POST"])
+def fs_cleanup():
+    what = json_body().get("what")
+    if what == "partials":
+        rels = [r for r, _s in _leftovers()[0]]
+    elif what == "sidecars":
+        rels = [r for r, _s in _leftovers()[1]]
+    elif what == "dupes":                                  # identical copies only - "same video" groups need you to choose
+        rels = [it["path"] for g in find_duplicates() if g["reason"] == "identical" for it in g["items"][1:]]
+    else:
+        return jsonify(success=False, message="Unknown cleanup."), 400
+    done, freed = 0, 0
+    for rel in rels:
+        ap = fs_abs(rel)
+        if ap is None or not ap.is_file():
+            continue
+        try:
+            size = ap.stat().st_size
+            ap.unlink()
+        except OSError:
+            continue
+        _retag(rel, None)
+        done, freed = done + 1, freed + size
+    fs_dirty()
+    return jsonify(success=True, deleted=done, freed_h=human(freed))
 
 
 def _paths(d, key="paths"):
@@ -3215,6 +3923,7 @@ settings.update(_load(SETTINGS_FILE, {}))
 for _w in watches.values():
     _w["busy"] = False
 threading.Thread(target=scheduler_loop, daemon=True, name="scheduler").start()
+threading.Thread(target=meta_loop, daemon=True, name="meta").start()
 
 
 # --------------------------------------------------------------------------- #

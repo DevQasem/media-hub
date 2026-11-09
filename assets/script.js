@@ -68,20 +68,23 @@ const detect = url => { const k = Object.keys(BRANDS).find(k => BRANDS[k].re.tes
 const setColor = c => document.documentElement.style.setProperty('--pc', c);
 
 /* ---------- appearance (theme, accent, text size, compact, confetti) ---------- */
-const UI_KEY = 'hub_ui', UI_DEF = {theme:'dark', accent:'auto', size:'m', density:'comfy', confetti:'1'};
+const UI_KEY = 'hub_ui', UI_DEF = {theme:'dark', accent:'auto', size:'m', density:'comfy', confetti:'1', palette:'classic'};
 const ACCENTS = {violet:'#8b5cf6', cyan:'#22d3ee', pink:'#f472b6', green:'#34d399', orange:'#fb923c', red:'#fb7185'};
 let ui = Object.assign({}, UI_DEF);
 try { Object.assign(ui, JSON.parse(localStorage.getItem(UI_KEY) || '{}')); } catch {}
 const accentOr = c => ui.accent !== 'auto' && ACCENTS[ui.accent] ? ACCENTS[ui.accent] : c;
 
 function applyUi() {
-  const d = document.documentElement; d.dataset.theme = ui.theme; d.dataset.size = ui.size; d.dataset.density = ui.density;
+  const d = document.documentElement; d.dataset.theme = ui.theme; d.dataset.size = ui.size; d.dataset.density = ui.density; d.dataset.palette = ui.palette || 'classic';
   const light = ui.theme === 'light' || (ui.theme === 'auto' && window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches);
-  if($('themeMeta')) $('themeMeta').content = light ? '#f1f4ff' : '#07080f';
+  d.dataset.scheme = light ? 'light' : 'dark';
+  if($('themeMeta')) $('themeMeta').content = (getComputedStyle(d).getPropertyValue('--bg') || '').trim() || (light ? '#f1f4ff' : '#07080f');
+  document.querySelectorAll('[data-look]').forEach(b => b.classList.toggle('on', (ui.palette || 'classic') === b.dataset.look));
   document.querySelectorAll('[data-ui]').forEach(b => { const [k, v] = b.dataset.ui.split(':'); b.classList.toggle('on', ui[k] === v); });
   if($('confettiOn')) $('confettiOn').checked = ui.confetti === '1';
   setColor(accentOr((BRANDS[document.body.dataset.site] || BRANDS.other).color));
 }
+try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => { if (ui.theme === 'auto') applyUi(); }); } catch {}
 function setUi(k, v) { ui[k] = v; try { localStorage.setItem(UI_KEY, JSON.stringify(ui)); } catch {} applyUi(); }
 function setBrand(key) {
   const b = BRANDS[key] || BRANDS.other; document.body.dataset.site = key; setColor(accentOr(b.color));
@@ -209,12 +212,42 @@ function igCard(r, d) {
   $('igbox').classList.add('show'); $('actions').classList.add('show'); refreshOpts();
 }
 
+/* ---------- playlist / channel picker (the Arroxy-style "choose videos" list) ---------- */
+const isListUrl = u => /[?&]list=|youtube\.com\/(?:playlist|@[\w.-]+|channel\/|c\/|user\/)|tiktok\.com\/@[\w.-]+\/?(?:[?#]|$)|\/(?:playlists?|channel|channels|user|users|series|collections?)\//i.test(u);
+const pl = {url:'', items:[], sel:new Set(), q:''};
+function closePl() { $('plmodal').classList.remove('open'); }
+async function openPl() {
+  pl.url = AppState.videoUrl; if (!pl.url) return;
+  $('plmodal').classList.add('open'); $('pltitle').textContent = '☑ Choose videos'; $('plFilter').value = ''; pl.q = '';
+  $('plist').innerHTML = '<div class="empty">Reading the list… (can take up to a minute for big channels)</div>'; $('plGoBtn').disabled = true;
+  const r = await post('/playlist-info', {url: pl.url});
+  if (!r.success) { $('plist').innerHTML = `<div class="empty"><b>😕</b>${esc(r.error || r.message || 'Could not read the list.')}</div>`; return; }
+  pl.items = r.entries; pl.sel = new Set(); $('pltitle').textContent = '☑ ' + (r.title || 'Choose videos'); renderPl();
+}
+function plShown() { const q = pl.q.toLowerCase(); return q ? pl.items.filter(e => e.title.toLowerCase().includes(q)) : pl.items; }
+function renderPl() {
+  const shown = plShown();
+  $('plist').innerHTML = shown.length ? shown.map(e => `<button class="prow${pl.sel.has(e.index) ? ' on' : ''}" data-i="${e.index}" aria-pressed="${pl.sel.has(e.index)}">`
+    + `<span class="pcheck" aria-hidden="true"></span>` + (e.thumb ? `<img loading="lazy" alt="" referrerpolicy="no-referrer" src="${esc(e.thumb)}">` : '<span class="pth">🎬</span>')
+    + `<span class="pmain"><b>${esc(e.title)}</b><small>#${e.index}${e.duration ? ' · ' + fmtDur(e.duration) : ''}</small></span></button>`).join('')
+    : '<div class="empty">No video matches that filter.</div>';
+  const n = pl.sel.size; $('plGoBtn').disabled = !n; $('plGoBtn').textContent = n ? `⬇ Download ${n} ${n === 1 ? 'video' : 'videos'}` : 'Pick at least one video';
+}
+async function plGo() {
+  if (!pl.sel.size) return;
+  const options = Object.assign(getOpts(), {name:'', playlist:'single', items:''}), items = pl.items.filter(e => pl.sel.has(e.index)).map(e => ({action_type:'url', target:e.url, options}));
+  closePl(); const r = await post('/batch', {items});
+  if (!r.success) return toast('Could not start the downloads');
+  setTracked([...tracked(), ...r.job_ids]); setGroups([...groups(), r.job_ids]);
+  toast(`${r.job_ids.length} queued` + (r.errors && r.errors.length ? ` · ${r.errors.length} skipped` : '')); watch();
+}
+
 function videoPreview(url) {
   AppState.mode = 'video'; AppState.videoUrl = url;
   const d = detect(url); setBrand(d.key); $('actions').classList.add('show');
   AppState.timer = setTimeout(async () => {
     const mine = ++AppState.seq;
-    setHint(`Reading ${d.name} link…`); $('preview').classList.add('show');
+    setHint(`Reading ${d.name} link…`); $('preview').classList.add('show'); $('plnote').style.display = 'none';
     $('thumb').className = 'thumb loading'; setThumb('');
     $('ptitle').textContent = 'Loading details…'; $('chips').innerHTML = ''; $('dur').style.display = 'none';
     $('siteBadge').textContent = d.name; $('siteBadge').style.background = d.color;
@@ -249,6 +282,8 @@ function videoPreview(url) {
     if (r.duration) { $('dur').textContent = fmtDur(r.duration); $('dur').style.display = ''; }
 
     const chips = [];
+    if (r.quality && r.quality.height) { const q = r.quality; chips.push([`🎞 ${q.height >= 2160 ? '4K' : q.height + 'p'}${q.fps >= 50 ? ' · ' + q.fps + ' fps' : ''}${q.hdr ? ' · HDR' : ''}`, 'ok']); }
+    $('plnote').style.display = isListUrl(url) ? '' : 'none';
     if (r.uploader) chips.push('👤 ' + r.uploader);
     if (r.duration) chips.push(`⏱ ${r.duration}s`);
     if (r.views != null) chips.push('👁 ' + new Intl.NumberFormat('en', {notation:'compact'}).format(r.views));
@@ -317,7 +352,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) setT
 window.addEventListener('focus', () => setTimeout(checkClipboard, 300));
 
 /* ---------- options (Customize) ---------- */
-const OPT_DEFAULTS = {kind:'video', quality:'best', container:'mp4', compat:false, audio_fmt:'mp3', abr:'192', subs:false, autosubs:false, sub_langs:'en',
+const OPT_DEFAULTS = {kind:'video', quality:'best', container:'mp4', compat:false, audio_fmt:'mp3', abr:'192', subs:false, autosubs:false, sub_langs:'en', sub_fmt:'srt',
   embed_subs:false, thumb:false, embed_thumb:false, meta:false, sponsor:false, desc:false, playlist:'single', items:'', clip_start:'', clip_end:'',
   date_after:'', date_before:'', min_dur:'', max_dur:'', min_views:'', max_mb:'', title_has:'', title_not:'',
   force:false, name:'', ig_what:'posts', fx_look:'none', fx_blur:'none', fx_sharpen:false, fx_mirror:'none', fx_rotate:'0', fx_speed:'1', fx_crop:'none', fx_scale:'none', fx_mute:false, fx_keep:true};
@@ -370,11 +405,12 @@ function updateGo(o, lk) {
     icon = '🖼️';
   }
   else {
-    label = o.kind === 'audio' ? 'Download ' + o.audio_fmt.toUpperCase() : o.kind === 'image' ? 'Save the photo' : o.kind === 'gif' ? 'Make a GIF' : o.kind === 'sticker' ? 'Make a sticker' : 'Download';
-    sub = o.kind === 'audio' ? `Audio only${['flac','wav'].includes(o.audio_fmt) ? '' : ' · ' + o.abr + ' kbps'}` : o.kind === 'image' ? 'Cover / photo as JPG'
+    label = o.kind === 'subs' ? 'Download subtitles' : o.kind === 'audio' ? 'Download ' + o.audio_fmt.toUpperCase() : o.kind === 'image' ? 'Save the photo' : o.kind === 'gif' ? 'Make a GIF' : o.kind === 'sticker' ? 'Make a sticker' : 'Download';
+    sub = o.kind === 'subs' ? `Subtitles only · ${o.sub_fmt.toUpperCase()} · ${o.sub_langs || 'en'}` : o.kind === 'audio' ? `Audio only${['flac','wav'].includes(o.audio_fmt) ? '' : ' · ' + o.abr + ' kbps'}` : o.kind === 'image' ? 'Cover / photo as JPG'
         : o.kind === 'gif' ? 'Looping GIF, 480 px' : o.kind === 'sticker' ? 'WhatsApp-size WebP' : `${o.quality === 'best' ? 'Best quality' : o.quality + 'p'} · ${o.container.toUpperCase()}`;
 
     if (o.kind === 'audio') icon = '🎵';
+    if (o.kind === 'subs') icon = '💬';
     if (o.kind === 'image') icon = '🖼️';
   }
 
@@ -507,7 +543,10 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) watc
 function renderStrip(running) {
   AppState.lastRunning = running;
   $('tbRun').textContent = running.length || ''; $('pillRun').textContent = running.length ? `⏳ ${running.length} running` : '⏳ idle'; $('pillRun').classList.toggle('on', running.length > 0);
-  const more = running.length > 4 ? `<div class="run"><span>+ ${running.length - 4} more running…</span></div>` : '';
+  const act = running.filter(j => j.status === 'running').length, wait = running.filter(j => j.status === 'queued').length, held = running.filter(j => j.status === 'paused').length;
+  if (running.length) $('pillRun').textContent = `⏳ ${act} running` + (wait ? ` · ${wait} waiting` : '') + (held ? ` · ${held} paused` : '');
+  const more = (running.length > 4 ? `<div class="run" data-openq="1"><span>+ ${running.length - 4} more in the queue…</span></div>` : '')
+    + (running.length ? `<button class="qlink" data-openq="1">☰ Manage queue <em>reorder · pause · cancel</em></button>` : '');
   $('strip').innerHTML = running.slice(0, 4).map(j => `<div class="run" data-run-id="${esc(j.id)}"><div class="pring${j.progress < 1 ? ' ind' : ''}" style="--p:${Math.round(j.progress)}"><b>${Math.round(j.progress)}</b></div><span>${esc(j.label)} · ${esc(j.message)}</span></div>`).join('') + more;
   document.querySelectorAll('.run[data-run-id]').forEach(el => el.addEventListener('click', (e) => peek(e.currentTarget.dataset.runId)));
 }
@@ -677,7 +716,7 @@ function takeLink(v) { setTab('home'); $('url').value = v; onUrlInput(); toast('
 
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
-    closeMaint(); closeSettings(); closeKeys(); closePicker(); closeFiles(); closeWatch(); closePin();
+    closeMaint(); closeSettings(); closeKeys(); closePicker(); closeFiles(); closeWatch(); closePin(); closeQueue();
     if ($('modal').classList.contains('open')) { AppState.resultOpen ? closeResult() : hideProgress(); }
     return;
   }
@@ -689,6 +728,7 @@ document.addEventListener('keydown', e => {
   else if (k === 's') openSettings(); else if (k === 't') openMaint(); else if (k === 'h') setTab('home');
   else if (k === 'w') openWatch();
   else if (k === 'f') openFiles();
+  else if (k === 'q') openQueue();
   else if (e.key === '?') $('kmodal').classList.add('open');
 });
 
@@ -731,9 +771,14 @@ async function restartApp() {
 }
 
 /* ---------- settings ---------- */
+const TPL_SAMPLE = {title:'My cool video', uploader:'Creator', id:'a1B2c3', date:'2026-10-31', resolution:'1080p', playlist_index:'07'};
+function tplPreview() { const t = $('nameTpl').value.trim(); $('tplprev').textContent = t ? 'Example: ' + t.replace(/\{(\w+)\}/g, (m, k) => TPL_SAMPLE[k] ?? m) + '.mp4' : 'Now: the title and the video id, like “My cool video [a1B2c3].mp4”.'; }
+async function saveTpl() { const r = await post('/settings', {name_template: $('nameTpl').value.trim()}); $('nameTpl').value = r.name_template || ''; tplPreview(); toast(r.name_template ? 'Name template saved ✓' : 'Back to the normal name'); }
 async function loadSettings() {
   const d = await api('/settings');
-  if (d.success) { $('ntfy').value = d.ntfy || ''; $('creatorFolders').checked = d.creator_folders !== false; $('igOrganize').checked = d.ig_organize !== false; $('autoName').value = d.auto_name || 'date'; $('preferH264').checked = d.prefer_h264 !== false; $('notifyDl').checked = !!d.notify_downloads; $('igcap').value = d.ig_cap || 30; }
+  if (d.success) { $('ntfy').value = d.ntfy || ''; $('creatorFolders').checked = d.creator_folders !== false; $('igOrganize').checked = d.ig_organize !== false; $('autoName').value = d.auto_name || 'date'; $('preferH264').checked = d.prefer_h264 !== false; $('notifyDl').checked = !!d.notify_downloads; $('igcap').value = d.ig_cap || 30;
+    $('nameTpl').value = d.name_template || ''; $('speedLimit').value = d.speed_limit || '0'; $('parallelParts').value = String(d.parallel_parts || 1); $('paceSel').value = d.pace || 'off'; $('retryCount').value = String(d.retry_count ?? 3); $('cleanUrls').checked = d.clean_urls !== false; tplPreview();
+    if ($('digestSel')) { $('digestSel').value = d.digest || 'off'; $('digestHour').value = String(d.digest_hour ?? 20); digestNote(d.digest_waiting || 0); } }
   $('clipOn').checked = clipEnabled(); loadVersion(); loadIg();
 }
 async function setCreatorFolders() { await post('/settings', {creator_folders: $('creatorFolders').checked}); toast($('creatorFolders').checked ? 'New downloads go into creator folders' : 'Creator folders off'); }
@@ -819,6 +864,17 @@ function initStaticEventBindings() {
   safeBind('testNtfyBtn', 'click', testSettings);
   safeBind('creatorFolders', 'change', setCreatorFolders);
   safeBind('notifyDl', 'change', async () => { await post('/settings', {notify_downloads: $('notifyDl').checked}); toast($('notifyDl').checked ? 'You will get an alert when your downloads finish' : 'Download alerts off'); });
+  safeBind('nameTpl', 'input', tplPreview); safeBind('saveTplBtn', 'click', saveTpl);
+  document.querySelectorAll('#tplChips [data-tpl]').forEach(b => b.addEventListener('click', () => { const i = $('nameTpl'); i.value = (i.value + b.dataset.tpl).slice(0, 150); tplPreview(); i.focus(); }));
+  [['speedLimit', 'speed_limit', 'Speed limit saved'], ['parallelParts', 'parallel_parts', 'Parallel parts saved'], ['paceSel', 'pace', 'Pause setting saved'], ['retryCount', 'retry_count', 'Retries saved']]
+    .forEach(([id, key, msg]) => safeBind(id, 'change', async () => { await post('/settings', {[key]: $(id).value}); toast(msg + ' ✓'); }));
+  safeBind('cleanUrls', 'change', async () => { await post('/settings', {clean_urls: $('cleanUrls').checked}); toast($('cleanUrls').checked ? 'Links are cleaned' : 'Links are kept as pasted'); });
+  safeBind('pickVideosBtn', 'click', openPl); safeBind('closePlBtn', 'click', closePl); safeBind('plGoBtn', 'click', plGo);
+  safeBind('plAllBtn', 'click', () => { plShown().forEach(e => pl.sel.add(e.index)); renderPl(); });
+  safeBind('plNoneBtn', 'click', () => { pl.sel.clear(); renderPl(); });
+  safeBind('plFilter', 'input', () => { pl.q = $('plFilter').value.trim(); renderPl(); });
+  $('plist').addEventListener('click', e => { const t = e.target.closest('.prow'); if (!t) return; const i = +t.dataset.i; pl.sel.has(i) ? pl.sel.delete(i) : pl.sel.add(i); renderPl(); });
+  const plm = $('plmodal'); plm.addEventListener('click', e => { if (e.target === plm) closePl(); });
   safeBind('preferH264', 'change', async () => { await post('/settings', {prefer_h264: $('preferH264').checked}); toast($('preferH264').checked ? 'New videos: iPhone-friendly (H.264)' : 'New videos: best quality, any format'); });
   safeBind('phoneSetupBtn', 'click', () => showPhoneSetup(false));
   safeBind('autoName', 'change', async () => { await post('/settings', {auto_name: $('autoName').value}); toast($('autoName').value === 'date' ? 'Empty name = date + number' : 'Empty name = keep the original title'); });
@@ -1067,8 +1123,9 @@ const xThumb = it => '/fs/thumb?path=' + encodeURIComponent(it.path);
 const XICON = {video:'🎬', photo:'🖼️', audio:'🎵', other:'📄'};
 const XFOLD = '<svg class="xfold" viewBox="0 0 64 52" aria-hidden="true"><path d="M4 8a4 4 0 0 1 4-4h14l6 6h28a4 4 0 0 1 4 4v30a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4z" fill="currentColor" opacity=".5"/><path d="M4 18a4 4 0 0 1 4-4h48a4 4 0 0 1 4 4v26a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4z" fill="currentColor"/></svg>';
 const xHuman = n => { for (const u of ['B','KB','MB','GB','TB']) { if (n < 1024 || u === 'TB') return (u === 'B' ? Math.round(n) : n.toFixed(1)) + ' ' + u; n /= 1024; } };
+const XSMART = ['vertical','horizontal','square','4k','hd','short','long'];
 const xGroup = t => t[0] === '@' ? 'users' : ['youtube','tiktok','snapchat','instagram','general'].includes(t) ? 'sites'
-  : ['video','photo','audio','posts','reels','stories','highlights','tagged','profile-picture'].includes(t) ? 'types' : /^\d{4}-\d{2}$/.test(t) ? 'dates' : 'custom';
+  : ['video','photo','audio','posts','reels','stories','highlights','tagged','profile-picture'].includes(t) ? 'types' : XSMART.includes(t) ? 'smart' : /^\d{4}-\d{2}$/.test(t) ? 'dates' : 'custom';
 const xChip = t => `<b class="tgc tg-${xGroup(t)}">${esc(t)}</b>`;
 const xSel = () => X.rows.filter(r => X.sel.has(r.path));
 const xDate = ts => new Date(ts * 1000).toLocaleString(undefined, {dateStyle:'medium', timeStyle:'short'});
@@ -1080,6 +1137,8 @@ async function xLoad(keepSel) {
   const my = ++X.seq; let r;
   if (xSearching()) { const qs = new URLSearchParams(); if (X.q) qs.set('q', X.q); X.tags.forEach(t => qs.append('tag', t)); r = await api('/fs/search?' + qs); }
   else if (X.path === '@recent') r = await api('/fs/search?recent=1');
+  else if (X.path === '@dupes') { r = await api('/fs/dupes'); if (r.success) { X.dupes = r; r.items = r.groups.flatMap((g, gi) => g.items.map((it, k) => Object.assign(it, {_g:gi, _k:k}))); } }
+  else if (X.path === '@storage') { r = await api('/fs/storage'); if (r.success) { X.storage = r; r.items = []; } }
   else r = await api('/fs/list?path=' + encodeURIComponent(X.path));
   if (my !== X.seq) return;
   if (!r.success && r.locked) { closeFiles(); return toast('The files are locked again - open them again'); }
@@ -1110,9 +1169,10 @@ const xTile = (it, i) => {
     + `<div class="xdt">${esc(xDate(it.modified))}</div><button class="xmore" aria-label="More">⋯</button></div>`;
 };
 function xRender() {
-  X.rows = xSorted(X.rows);
+  const special = !xSearching() && (X.path === '@dupes' || X.path === '@storage');
+  if (!special) X.rows = xSorted(X.rows);
   const g = $('xgrid'); g.className = 'xgrid ' + X.view + (X.selMode ? ' selmode' : ''); g.style.setProperty('--xs', X.size + 'px');
-  g.innerHTML = X.rows.length ? X.rows.map(xTile).join('')
+  g.innerHTML = special ? (X.path === '@dupes' ? xDupesHtml() : xStorageHtml()) : X.rows.length ? X.rows.map(xTile).join('')
     : `<div class="empty" style="grid-column:1/-1"><b>${xSearching() ? '🔍' : '📭'}</b>${xSearching() ? 'Nothing matches your search.' : X.path ? 'This folder is empty.' : 'No downloads yet.'}</div>`;
   $('xGrid').classList.toggle('on', X.view === 'grid'); $('xList').classList.toggle('on', X.view === 'list');
   $('xsort').value = X.sort; $('xdesc').classList.toggle('asc', !X.desc); $('xsize').value = X.size;
@@ -1123,6 +1183,8 @@ function xCrumbs() {
   let h;
   if (xSearching()) h = '<button data-go="">🏠</button><span>›</span><b>Search results</b>';
   else if (X.path === '@recent') h = '<button data-go="">🏠</button><span>›</span><b>Recent</b>';
+  else if (X.path === '@dupes') h = '<button data-go="">🏠</button><span>›</span><b>Duplicates</b>';
+  else if (X.path === '@storage') h = '<button data-go="">🏠</button><span>›</span><b>Storage</b>';
   else { const ps = X.path ? X.path.split('/') : []; h = '<button data-go="">🏠 Home</button>' + ps.map((p, i) => `<span>›</span><button data-go="${esc(ps.slice(0, i + 1).join('/'))}">${esc(p)}</button>`).join(''); }
   $('xcrumbs').innerHTML = h;
 }
@@ -1132,7 +1194,7 @@ function xStatus() {
   $('xstat').textContent = `${X.rows.length} item${X.rows.length === 1 ? '' : 's'}` + (s.length ? ` · ${s.length} selected${size ? ' (' + xHuman(size) + ')' : ''}` : '') + (xSearching() ? ' · search results' : '');
   xActBar();
 }
-const XGROUPS = [['sites','🌐','Sites'], ['users','👤','Users'], ['types','🎞️','Types'], ['custom','🏷️','My tags'], ['dates','📅','Months']];
+const XGROUPS = [['sites','🌐','Sites'], ['users','👤','Users'], ['types','🎞️','Types'], ['smart','✨','Shape & length'], ['custom','🏷️','My tags'], ['dates','📅','Months']];
 function xNav() {
   const T = (X.tagsAll && X.tagsAll.tags) || [];
   const btns = XGROUPS.map(([g, ico, label]) => {
@@ -1142,6 +1204,8 @@ function xNav() {
   }).join('');
   $('xnav').innerHTML = `<button data-go="" class="${!X.path && !xSearching() ? 'on' : ''}"><span>🏠 All files</span></button>`
     + `<button data-go="@recent" class="${X.path === '@recent' && !xSearching() ? 'on' : ''}"><span>🕒 Recent</span></button>`
+    + `<button data-go="@dupes" class="${X.path === '@dupes' && !xSearching() ? 'on' : ''}"><span>👯 Duplicates</span></button>`
+    + `<button data-go="@storage" class="${X.path === '@storage' && !xSearching() ? 'on' : ''}"><span>📊 Storage</span></button>`
     + `<h5>Filter by</h5>` + btns
     + (X.tags.length ? `<button data-clear="1"><span style="color:var(--err)">✕ Clear filters</span><em>${X.tags.length}</em></button>` : '');
   if (X.tagsAll) $('xdisk').textContent = `${X.tagsAll.files} files · ${X.tagsAll.total_h} used · ${X.tagsAll.free_h} free`;
@@ -1422,7 +1486,7 @@ function initExplorer() {
   /* rubber-band selection: hold the left button on empty space and drag a rectangle (like Windows) */
   const band = $('xband'); let bs = null;
   sc.addEventListener('mousedown', e => {
-    if (e.button !== 0 || e.target.closest('.xi')) return;
+    if (e.button !== 0 || e.target.closest('.xi, .xpanel')) return;
     const r = sc.getBoundingClientRect();
     if (e.clientX - r.left >= sc.clientWidth || e.clientY - r.top >= sc.clientHeight) return;      // that was the scrollbar
     e.preventDefault(); sc.focus({preventScroll:true});
@@ -1597,7 +1661,7 @@ function initShell() {
   });
   document.querySelectorAll('#rail [data-nav]').forEach(b => b.addEventListener('click', () => {
     const n = b.dataset.nav;
-    if (n === 'home') setTab('home'); else if (n === 'watch') openWatch(); else if (n === 'files') openFiles();
+    if (n === 'home') setTab('home'); else if (n === 'watch') openWatch(); else if (n === 'files') openFiles(); else if (n === 'queue') openQueue();
     else if (n === 'settings') openSettings(); else if (n === 'keys') $('kmodal').classList.add('open');
   }));
   safeBind('navFilesBtn', 'click', openFiles);
@@ -1667,3 +1731,128 @@ if (document.readyState === 'loading') {
 } else {
     bootApp();
 }
+
+/* ================= download queue: reorder, hold, pause, cancel ================= */
+const Q = {timer:null, busy:false};
+const qIds = () => [...new Set([...tracked(), ...groups().flat()])];
+function openQueue() { $('qmodal').classList.add('open'); qLoad(); clearInterval(Q.timer); Q.timer = setInterval(qLoad, 1500); }
+function closeQueue() { if (!$('qmodal')) return; $('qmodal').classList.remove('open'); clearInterval(Q.timer); Q.timer = null; }
+async function qLoad() {
+  if (Q.busy) return; Q.busy = true;
+  try {
+    const ids = qIds();
+    const d = ids.length ? await api('/queue?ids=' + ids.map(encodeURIComponent).join(',')) : {success:true, jobs:[], slots:3};
+    if (d.success) qRender(d.jobs || [], d.slots || 3);
+  } finally { Q.busy = false; }
+}
+function qRender(jobs, slots) {
+  const run = jobs.filter(j => j.status === 'running'), wait = jobs.filter(j => j.status === 'queued'), held = jobs.filter(j => j.status === 'paused');
+  $('qsum').textContent = jobs.length ? `${run.length} of ${slots} slots busy · ${wait.length} waiting${held.length ? ' · ' + held.length + ' paused' : ''}` : '';
+  $('qPauseAll').disabled = !(run.some(j => j.can_pause) || wait.length); $('qResumeAll').disabled = !held.length;
+  const row = (j, i, list) => {
+    const st = j.status, p = Math.round(j.progress || 0);
+    const btn = (a, ico, lab, dis) => `<button class="qb${a === 'cancel' ? ' del' : ''}" data-qa="${a}" data-id="${esc(j.id)}" title="${lab}" aria-label="${lab}"${dis ? ' disabled' : ''}>${ico}</button>`;
+    const move = st === 'queued' ? btn('top', '⤒', 'Start next', i === 0) + btn('up', '↑', 'Move up', i === 0) + btn('down', '↓', 'Move down', i === list.length - 1) : '';
+    const pr = st === 'paused' ? btn('resume', '▶', 'Resume') : (st === 'queued' || j.can_pause) ? btn('pause', '⏸', 'Pause') : '';
+    return `<div class="qrow q-${st}"><div class="qpos">${st === 'running' ? `<div class="pring${p < 1 ? ' ind' : ''}" style="--p:${p};--ringbg:var(--modal)"><b>${p}</b></div>` : st === 'queued' ? `<b>#${j.position || i + 1}</b>` : '⏸'}</div>`
+      + `<div class="qmain"><b>${esc(j.label)}</b><small>${esc(j.message || '')}${j.speed ? ' · ' + esc(j.speed) : ''}${j.eta ? ' · ETA ' + esc(j.eta) : ''}</small>${st === 'running' ? `<div class="qbar"><i style="width:${p}%"></i></div>` : ''}</div>`
+      + `<div class="qctl">${move}${pr}${btn('cancel', '✕', 'Cancel')}</div></div>`;
+  };
+  const sec = (t, list) => list.length ? `<div class="qh">${t}<em>${list.length}</em></div>` + list.map(row).join('') : '';
+  $('qlist').innerHTML = jobs.length ? sec('⚡ Downloading now', run) + sec('⏳ Waiting in line', wait) + sec('⏸ Paused', held)
+    : '<div class="empty"><b>🧘</b>Nothing in the queue. Paste a few links (or use “Paste many links at once”) and they line up here.</div>';
+}
+async function qAct(id, a) {
+  const r = await post(`/queue/${encodeURIComponent(id)}/${a}`, {});
+  if (!r.success) toast(r.message || 'That did not work'); else if (a === 'pause') toast('Paused - it continues where it stopped');
+  qLoad(); watch();
+}
+async function qAll(a) {
+  const d = await api('/queue?ids=' + qIds().map(encodeURIComponent).join(',')); if (!d.success) return;
+  const list = (d.jobs || []).filter(j => a === 'pause' ? (j.status === 'queued' || (j.status === 'running' && j.can_pause)) : j.status === 'paused');
+  for (const j of list) await post(`/queue/${encodeURIComponent(j.id)}/${a}`, {});
+  toast(list.length ? (a === 'pause' ? `Paused ${list.length}` : `Resumed ${list.length}`) : 'Nothing to change'); qLoad(); watch();
+}
+
+/* ================= watchlist digest ================= */
+function digestNote(n) {
+  const on = $('digestSel').value === 'daily';
+  $('digestHourBox').hidden = !on;
+  $('digestMsg').textContent = on ? (n ? `${n} new post${n === 1 ? '' : 's'} waiting for the next digest.` : 'Nothing waiting yet.') : 'You get one alert per account, right when it posts.';
+}
+async function saveDigest() {
+  const r = await post('/settings', {digest: $('digestSel').value, digest_hour: $('digestHour').value});
+  if (!r.success) return toast(r.message || 'Could not save');
+  digestNote(r.digest_waiting || 0); toast(r.digest === 'daily' ? `One digest a day at ${String(r.digest_hour).padStart(2, '0')}:00 ✓` : 'Instant watchlist alerts ✓');
+}
+
+/* ================= theme presets ================= */
+const LOOKS_THEME = {classic:'dark', midnight:'dark', neon:'dark', sunset:'dark', paper:'light'};
+function applyLook(p) {
+  if (!LOOKS_THEME[p]) return;
+  ui.palette = p; ui.theme = LOOKS_THEME[p];
+  try { localStorage.setItem(UI_KEY, JSON.stringify(ui)); } catch {}
+  applyUi(); toast(`${p[0].toUpperCase() + p.slice(1)} look ✓`);
+}
+
+/* ================= files: duplicates + storage ================= */
+function xDupesHtml() {
+  const d = X.dupes; if (!d) return '';
+  if (!d.groups.length) return '<div class="xpanel empty" style="grid-column:1/-1"><b>✨</b>No duplicates - every file is saved only once.</div>';
+  let i = 0;
+  const head = `<div class="xpanel xbanner" style="grid-column:1/-1"><div><b>${d.extra} extra cop${d.extra === 1 ? 'y' : 'ies'}</b> in ${d.groups.length} group${d.groups.length === 1 ? '' : 's'} · ${esc(d.wasted_h)} you could free</div>`
+    + `<div class="xbtns"><button class="btn ghost" data-dsel="1">☑ Select the extra copies</button></div>`
+    + `<p class="xhint">The oldest file in each group is the one kept. “Same video” groups are different files of one video (e.g. 720p and 1080p) - look before you delete.</p></div>`;
+  return head + d.groups.map(g => `<div class="xpanel xgh" style="grid-column:1/-1"><span class="tgc ${g.reason === 'identical' ? 'tg-sites' : 'tg-dates'}">${g.reason === 'identical' ? '🟰 identical' : '🎬 same video'}</span><b>${g.items.length} copies</b><em>${esc(g.wasted_h)} extra</em></div>`
+    + g.items.map(it => { const html = xTile(it, i); i++; return it._k === 0 ? html.replace('<div class="xth">', '<div class="xth"><i class="xkeep">KEEP</i>') : html; }).join('')).join('');
+}
+const xBar = (rows, max, cls) => rows.map(r => `<div class="sbar ${cls || ''}"${r.go !== undefined ? ` data-sgo="${esc(r.go)}" role="button" tabindex="0"` : ''}><span>${esc(r.label || r.name)}</span><i><u style="width:${max ? Math.max(2, r.size / max * 100) : 0}%;${r.c ? '--c:' + r.c : ''}"></u></i><em>${esc(r.size_h)}</em></div>`).join('');
+function xStorageHtml() {
+  const s = X.storage; if (!s) return '';
+  const SITE_C = {youtube:'#ff4d5e', tiktok:'#25f4ee', instagram:'#f472b6', snapchat:'#fffc00', general:'#a78bfa'};
+  const KIND = {video:['🎬 Videos','#8b5cf6'], photo:['🖼️ Photos','#22d3ee'], audio:['🎵 Audio','#34d399'], other:['📄 Other','#9aa0c3']};
+  const dk = s.disk, other = Math.max(0, dk.used - s.total), pc = v => (v / dk.total * 100).toFixed(1);
+  const maxOf = a => Math.max(0, ...a.map(r => r.size));
+  const sites = s.sites.map(r => Object.assign({}, r, {label:r.name, c:SITE_C[r.name], go:r.name}));
+  const users = s.users.map(r => Object.assign({}, r, {label:r.name.split('/')[1] + '  ·  ' + r.name.split('/')[0], go:r.name}));
+  const kinds = s.kinds.map(r => Object.assign({}, r, {label:(KIND[r.name] || [r.name])[0], c:(KIND[r.name] || [])[1]}));
+  const mmax = maxOf(s.months);
+  const months = s.months.map(m => `<div class="mcol" title="${esc(m.name)}: ${esc(m.size_h)}"><i style="height:${mmax ? Math.max(3, m.size / mmax * 100) : 0}%"></i><span>${esc(m.name.slice(5))}</span></div>`).join('');
+  const clean = (k, ico, t, desc) => { const c = s.cleanup[k]; return `<div class="cl"><b>${ico} ${t}</b><small>${desc}</small><div class="clrow"><em>${c.count} file${c.count === 1 ? '' : 's'} · ${esc(c.size_h)}</em><button class="btn ghost" data-clean="${k}" data-n="${c.count}"${c.count ? '' : ' disabled'}>Clean up</button></div></div>`; };
+  return `<div class="xpanel stg" style="grid-column:1/-1">
+    <section class="scard wide"><h4>💾 Disk</h4>
+      <div class="disk"><i class="d1" style="width:${pc(s.total)}%" title="Media Hub"></i><i class="d2" style="width:${pc(other)}%" title="Other files"></i></div>
+      <div class="dleg"><span><i class="d1"></i>Media Hub <b>${esc(s.total_h)}</b></span><span><i class="d2"></i>Other files <b>${esc(xHuman(other))}</b></span><span><i></i>Free <b>${esc(dk.free_h)}</b></span><span class="xhint">${s.files} files · disk ${esc(dk.total_h)}</span></div></section>
+    <section class="scard"><h4>🌐 By site</h4>${xBar(sites, maxOf(sites)) || '<p class="xhint">Nothing yet.</p>'}</section>
+    <section class="scard"><h4>🎞️ By type</h4>${xBar(kinds, maxOf(kinds)) || '<p class="xhint">Nothing yet.</p>'}</section>
+    <section class="scard"><h4>👤 Biggest creators <small>tap to open</small></h4>${xBar(users, maxOf(users)) || '<p class="xhint">No creator folders yet.</p>'}</section>
+    <section class="scard"><h4>📅 Added per month</h4><div class="months">${months || '<p class="xhint">Nothing yet.</p>'}</div></section>
+    <section class="scard wide"><h4>🧹 Cleanup <small>deleting cannot be undone</small></h4><div class="cls">
+      ${clean('dupes', '👯', 'Extra identical copies', 'Keeps the oldest copy of each file.')}
+      ${clean('partials', '🧩', 'Unfinished downloads', 'Leftover .part files older than 3 hours.')}
+      ${clean('sidecars', '📝', 'Info side files', 'yt-dlp .description and .info.json files.')}
+    </div></section></div>`;
+}
+async function xClean(what, n) {
+  const names = {dupes:'extra identical copies', partials:'unfinished download leftovers', sidecars:'info side files'};
+  if (!confirm(`Delete ${n} ${names[what]}?\n\nThis cannot be undone.`)) return;
+  const r = await xPost('/fs/cleanup', {what}); if (r.success) toast(`Deleted ${r.deleted} file${r.deleted === 1 ? '' : 's'} · freed ${r.freed_h}`); xAfter();
+}
+
+(function initExtras() {
+  safeBind('closeQueueBtn', 'click', closeQueue); safeBind('qPauseAll', 'click', () => qAll('pause')); safeBind('qResumeAll', 'click', () => qAll('resume'));
+  const qm = $('qmodal'); if (qm) qm.addEventListener('click', e => { if (e.target === qm) closeQueue(); const b = e.target.closest('[data-qa]'); if (b) qAct(b.dataset.id, b.dataset.qa); });
+  $('strip').addEventListener('click', e => { if (e.target.closest('[data-openq]')) { e.stopPropagation(); openQueue(); } });
+  safeBind('pillRun', 'click', openQueue);
+  safeBind('digestSel', 'change', saveDigest); safeBind('digestHour', 'change', saveDigest);
+  safeBind('digestNowBtn', 'click', async () => { const r = await post('/digest/send', {}); toast(r.message || 'Done'); loadSettings(); });
+  document.querySelectorAll('[data-look]').forEach(b => b.addEventListener('click', () => applyLook(b.dataset.look)));
+  applyUi();
+  $('xgrid').addEventListener('click', e => {
+    const c = e.target.closest('[data-clean]'), g = e.target.closest('[data-sgo]'), s = e.target.closest('[data-dsel]');
+    if (c) { e.stopPropagation(); xClean(c.dataset.clean, c.dataset.n); }
+    else if (g) { e.stopPropagation(); xGo(g.dataset.sgo); }
+    else if (s) { e.stopPropagation(); X.selMode = true; X.sel = new Set(X.rows.filter(r => r._k > 0).map(r => r.path)); xRender(); }
+  }, true);
+  $('xgrid').addEventListener('keydown', e => { const g = e.target.closest('[data-sgo]'); if (g && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); xGo(g.dataset.sgo); } });
+})();
