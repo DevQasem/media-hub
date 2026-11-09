@@ -7,8 +7,10 @@ services:
     ports:
       - "5000:5000"
     volumes:
-      # Maps your local ./hub-data folder to the hardcoded path in your app.py
+      # App data (jobs, settings, watchlist, tags, thumbnails) stays in ./hub-data
       - ./hub-data:/root/media-downloader
+      # The downloaded media itself: set MEDIA_DIR in .env (e.g. /mnt/data/media), defaults to ./hub-data/downloads
+      - ${MEDIA_DIR:-./hub-data/downloads}:/root/media-downloader/downloads
     environment:
       BOT_TOKEN: ${BOT_TOKEN}
       ALLOWED_IDS: ${ALLOWED_IDS}

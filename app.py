@@ -1915,6 +1915,21 @@ def preview():
     if not valid_http_url(url):
         return jsonify(success=False, error="That doesn't look like a valid link."), 400
 
+    lu = live_user_from(url)
+    if lu:                                                       # TikTok LIVE link: say whether they are live now
+        try:
+            st = preview_pool.submit(tt_live_status, lu).result(timeout=PREVIEW_TIMEOUT)
+        except FutTimeout:
+            return jsonify(success=False, error="TikTok did not answer in time - try again."), 504
+        except LiveError as exc:
+            return jsonify(success=False, error=str(exc)), 502
+        with live_lock:
+            rec = live_now.get(lu.lower())
+        return jsonify(success=True, title=(st["title"] or f"@{lu}'s LIVE") if st["live"] else f"@{lu} is not live right now",
+                       thumbnail=st["cover"] if st["live"] else "", uploader="@" + lu, duration=None, views=None,
+                       upload_date=None, site="TikTok LIVE", category="tiktok", channel_url="",
+                       live={"user": lu, "is_live": st["live"], "recording": rec})
+
     # --- TikTok: share links -> real address; photo posts are not videos, so yt-dlp cannot read them (the download handles them) ---
     tiktok = detect_category(url) == "tiktok"
     if tiktok:
@@ -2149,6 +2164,9 @@ def enqueue(action, target, quality="best", batch=None, options=None, only=None)
         target = clean_url(target)
         if not valid_http_url(target):
             return None, "Please enter a valid http(s) link."
+        lu = live_user_from(target)
+        if lu:                                                   # a TikTok LIVE link: record it now, outside the queue
+            return start_live(lu)
         category = detect_category(target)
         opts = sanitize_options(options if options else {"quality": quality})
         fn, args, label = ytdlp_worker, (target, category, opts, cancel), target
@@ -2329,6 +2347,453 @@ def queue_action(job_id, action):
         j = 0 if action == "top" else max(0, i - 1) if action == "up" else min(len(pending), i + 1)
         pending.insert(j, job_id)
     return jsonify(success=True)
+
+
+# --------------------------------------------------------------------------- #
+# TikTok LIVE recording
+# Method adapted from Michele0303/tiktok-live-recorder (MIT License, (c) 2023 Michele):
+# username -> room id -> "is it live?" -> best FLV/HLS stream URL -> save the raw stream -> remux to MP4.
+# --------------------------------------------------------------------------- #
+try:
+    from curl_cffi import requests as _cffi            # looks like a real browser to TikTok (also used by yt-dlp)
+except ImportError:                                     # still works without it, but TikTok blocks plain clients more often
+    _cffi = None
+
+TT_WEB, TT_CAST, TT_HELPER = "https://www.tiktok.com", "https://webcast.tiktok.com", "https://tikrec.com"
+TT_LIVE_RE = re.compile(r"^https?://(?:www\.|m\.)?tiktok\.com/@([A-Za-z0-9._-]{2,24})/live\b", re.I)
+TT_USER_RE = re.compile(r"^[A-Za-z0-9._-]{2,24}$")
+TT_HEADERS = {"Accept-Language": "en-US", "Referer": "https://www.tiktok.com/", "Origin": "https://www.tiktok.com",
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/136.0.0.0 Safari/537.36"}
+LIVE_INTERVALS = (2, 5, 10)                             # live watches can check more often than post watches
+LIVE_MIN_FREE = 2 * 1024 ** 3                           # stop a recording before the disk is full
+live_now = {}                                           # lower-case username -> job id of the running recording
+live_lock = threading.Lock()
+_tt_local = threading.local()
+
+
+class LiveError(Exception):
+    pass
+
+
+def _tt_session():
+    s = getattr(_tt_local, "s", None)
+    if s is None and _cffi is not None:
+        s = _tt_local.s = _cffi.Session(impersonate="chrome136")
+        s.headers.update(TT_HEADERS)
+    return s
+
+
+def _tt_json(url, params=None, timeout=15):
+    """GET a TikTok JSON endpoint; returns {} when TikTok answers with its 'please wait' wall or anything not JSON."""
+    if params:
+        url += ("&" if "?" in url else "?") + "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
+    try:
+        s = _tt_session()
+        if s is not None:
+            text = s.get(url, timeout=timeout).text
+        else:
+            req = urllib.request.Request(url, headers=TT_HEADERS)
+            text = urllib.request.urlopen(req, timeout=timeout).read(4 * 1024 * 1024).decode("utf-8", "replace")
+    except Exception as exc:  # noqa: BLE001
+        raise LiveError(f"Could not reach TikTok: {exc}") from exc
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _tt_room_direct(user):
+    for attempt in range(3):                             # TikTok sometimes answers with its "please wait" wall: try again
+        d = _tt_json(f"{TT_WEB}/api-live/user/room/", {"aid": 1988, "sourceType": 54, "uniqueId": user})
+        if d:
+            break
+        time.sleep(1.5 * (attempt + 1))
+    data = d.get("data") or {}
+    u, lr = data.get("user") or {}, data.get("liveRoom") or {}
+    if not u and d.get("statusCode") not in (None, 0):
+        raise LiveError("TikTok account not found." if d.get("statusCode") == 19881007 else "TikTok refused the lookup.")
+    return u.get("roomId") or "", lr.get("title") or "", (lr.get("coverUrl") or u.get("avatarLarger") or "")
+
+
+def _tt_room_helper(user):
+    """Fallback used by Michele0303's recorder: tikrec.com signs the lookup URL. It sees the username - can be switched off."""
+    try:
+        signed = _tt_json(f"{TT_HELPER}/tiktok/room/api/sign", {"unique_id": user}).get("signed_path")
+    except LiveError:
+        signed = None
+    if not signed or not str(signed).startswith("/"):
+        return ""
+    d = _tt_json(TT_WEB + signed)
+    return str(((d.get("data") or {}).get("user") or {}).get("roomId") or "")
+
+
+def tt_room(user):
+    """(room_id, title, cover) for a username. room_id is '' when TikTok gives none."""
+    rid, title, cover = "", "", ""
+    try:
+        rid, title, cover = _tt_room_direct(user)
+    except LiveError as exc:
+        if "not found" in str(exc) or not settings.get("live_helper", True):
+            raise                                        # a missing account is final - never ask the helper about it
+    if not rid and settings.get("live_helper", True):
+        rid = _tt_room_helper(user)
+    return str(rid or ""), title, cover
+
+
+def tt_room_info(rid):
+    return _tt_json(f"{TT_CAST}/webcast/room/info/", {"aid": 1988, "room_id": rid})
+
+
+def tt_is_live(rid):
+    if not rid:
+        return False
+    alive = _tt_json(f"{TT_CAST}/webcast/room/check_alive/", {"aid": 1988, "region": "CH", "room_ids": rid, "user_is_login": "true"})
+    lst = alive.get("data")
+    if not (isinstance(lst, list) and lst and isinstance(lst[0], dict) and lst[0].get("alive")):
+        return False
+    info = tt_room_info(rid)
+    if info.get("status_code") == 4003110:               # live but restricted for anonymous viewers: still try
+        return True
+    room = info.get("data") or {}
+    return info.get("status_code", 0) == 0 and str(room.get("status", 2)) == "2"
+
+
+LIVE_QUALITY_ORDER = {"best": ("origin", "uhd", "hd", "sd", "ld"), "hd": ("hd", "uhd", "origin", "sd", "ld"),
+                      "sd": ("sd", "ld", "hd", "uhd", "origin")}
+
+
+def _quality_label(key, main, names):
+    try:
+        p = json.loads(main.get("sdk_params") or "{}")
+    except ValueError:
+        p = {}
+    res = str(p.get("resolution") or "")
+    h = min((int(x) for x in res.split("x") if x.isdigit()), default=0)
+    name = names.get(key) or {"origin": "Original", "uhd": "Ultra HD", "hd": "HD", "sd": "SD", "ld": "Low"}.get(key, key)
+    return f"{name} · {h}p" if h else name
+
+
+def tt_streams(rid):
+    """[(url, quality label)] - the quality you chose first (Original by default), FLV before HLS like the original recorder."""
+    info = tt_room_info(rid)
+    if "This account is private" in json.dumps(info)[:20000]:
+        raise LiveError("This account is private.")
+    if info.get("status_code") == 4003110:
+        raise LiveError("TikTok only shows this live to logged-in or following viewers.")
+    room = info.get("data") or {}
+    su = room.get("stream_url") or {}
+    out = []
+    add = lambda u, lab="": u and isinstance(u, str) and all(u != x for x, _ in out) and out.append((u, lab))
+    sdk = (su.get("live_core_sdk_data") or {}).get("pull_data") or {}
+    try:
+        streams = json.loads(sdk.get("stream_data") or "{}").get("data") or {}
+    except ValueError:
+        streams = {}
+    quals = [q for q in (sdk.get("options") or {}).get("qualities") or [] if isinstance(q, dict)]
+    level = {q.get("sdk_key"): q.get("level", -1) for q in quals}
+    names = {q.get("sdk_key"): str(q.get("name") or "") for q in quals if q.get("name")}
+    pref = LIVE_QUALITY_ORDER.get(settings.get("live_quality", "best"), LIVE_QUALITY_ORDER["best"])
+    rank = lambda k: (pref.index(k) if k in pref else len(pref), -level.get(k, -1))
+    for key in sorted(streams, key=rank):
+        main = (streams[key] or {}).get("main") or {}
+        lab = _quality_label(key, main, names)
+        add(main.get("flv"), lab)
+        add(main.get("hls") or main.get("m3u8"), lab)
+    flv = su.get("flv_pull_url") or {}
+    for key, lab in (("FULL_HD1", "Full HD"), ("HD1", "HD"), ("SD2", "SD"), ("SD1", "SD")):
+        add(flv.get(key), lab)
+    add(su.get("hls_pull_url"), "HLS")
+    return out
+
+
+def tt_stream_urls(rid):
+    return [u for u, _l in tt_streams(rid)]
+
+
+def tt_live_status(user):
+    """What the page and the watchlist need: {'user', 'room_id', 'live', 'title', 'cover'}."""
+    rid, title, cover = tt_room(user)
+    return {"user": user, "room_id": rid, "live": tt_is_live(rid), "title": title, "cover": cover}
+
+
+def _stream_to_file(url, fh, job, cancel, started, deadline):
+    """Copy one stream URL into the open file until it ends, we are stopped, time is up or the disk is nearly full.
+    Returns (bytes written, reason)."""
+    req = urllib.request.Request(url, headers=TT_HEADERS)
+    n, tick = 0, 0.0
+    with urllib.request.urlopen(req, timeout=20) as r:
+        while True:
+            if cancel.is_set():
+                return n, "stopped"
+            if time.time() >= deadline:
+                return n, "time"
+            chunk = r.read(256 * 1024)
+            if not chunk:
+                return n, "ended"
+            fh.write(chunk)
+            n += len(chunk)
+            now = time.time()
+            if now - tick > 2:
+                tick = now
+                if now - job.get("stats_t", 0) > 45:              # viewers + title, at most once every 45 s
+                    job["stats_t"] = now
+                    threading.Thread(target=_live_stats, args=(job,), daemon=True).start()
+                if shutil.disk_usage(BASE_DIR).free < LIVE_MIN_FREE:
+                    return n, "disk"
+                size = fh.tell()
+                el = int(now - started)
+                update(job, message=f"🔴 Recording · {el // 3600}:{el // 60 % 60:02d}:{el % 60:02d} · {human(size)}",
+                       speed=human(size / max(1, now - started)) + "/s", rec_size=size, rec_secs=el)
+
+
+def _live_stats(job):
+    try:
+        room = tt_room_info(job.get("room_id") or "").get("data") or {}
+    except Exception:  # noqa: BLE001
+        return
+    n = room.get("user_count")
+    if isinstance(n, int):
+        update(job, viewers=n, peak=max(n, job.get("peak") or 0))
+    if room.get("title"):
+        update(job, live_title=str(room["title"])[:200])
+
+
+def el_now(started):
+    return int(time.time() - started)
+
+
+def tiktok_live_worker(job, user, cancel):
+    """Record one TikTok LIVE until it ends or you press Stop - stopping always SAVES what was recorded."""
+    update(job, status="running", message=f"Looking for @{user}'s live…", progress=0)
+    try:
+        st = tt_live_status(user)
+    except LiveError as exc:
+        return finish_err(job, str(exc))
+    if not st["room_id"]:
+        return finish_err(job, f"Could not find @{user}'s live room (TikTok may be blocking the check - try again in a minute).")
+    if not st["live"]:
+        return finish_err(job, f"@{user} is not live right now.")
+    _need_ffmpeg()
+    folder = BASE_DIR / "tiktok"
+    out_dir = folder / user / "lives"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"{user} live {time.strftime('%Y-%m-%d %H-%M')}"
+    raw = out_dir / f"{stem}.flv.part"
+    started = time.time()
+    deadline = started + float(settings.get("live_max_hours", 6)) * 3600
+    update(job, live=True, rec_started=started, label=f"🔴 @{user} LIVE", message="🔴 Recording…",
+           live_user=user, room_id=st["room_id"], live_title=st["title"], viewers=None, peak=0, cover=st["cover"], marks=[])
+    reason, fails, total, errmsg = "ended", 0, 0, ""
+    with open(raw, "ab") as fh:
+        while True:
+            try:
+                urls = tt_streams(st["room_id"])
+            except LiveError as exc:
+                errmsg = str(exc)
+                break
+            got = 0
+            for item in urls:
+                url, qlab = item if isinstance(item, tuple) else (item, "")
+                if qlab and job.get("quality") != qlab:
+                    update(job, quality=qlab)
+                try:
+                    n, reason = _stream_to_file(url, fh, job, cancel, started, deadline)
+                except Exception as exc:  # noqa: BLE001   a dropped connection: try the next URL / reconnect below
+                    n, reason = 0, f"network: {exc}"
+                got += n
+                if n >= 4096 or reason in ("stopped", "time", "disk"):
+                    break
+            total += got
+            fh.flush()
+            if reason in ("stopped", "time", "disk"):
+                break
+            fails = 0 if got else fails + 1
+            if fails >= 6 or not tt_is_live(st["room_id"]):      # the live is over (or TikTok keeps refusing)
+                break
+            if cancel.wait(2):
+                reason = "stopped"
+                break
+    if total < 4096:
+        raw.unlink(missing_ok=True)
+        return finish_err(job, errmsg or "Could not record anything - TikTok gave no working stream for this live.")
+    update(job, message="Saving the recording…", speed="")
+    marks = sorted(m["t"] for m in job.get("marks") or [] if 0 < m["t"] < el_now(started))
+    meta_in, meta_map, metafile = [], [], None
+    if marks:                                            # your ⭐ moments become chapters you can jump to in any player
+        pts = [0] + marks + [int(el_now(started))]
+        notes = {m["t"]: m.get("note") for m in job.get("marks") or []}
+        lines = [";FFMETADATA1"]
+        for i in range(len(pts) - 1):
+            title = "Start" if i == 0 else (notes.get(pts[i]) or f"⭐ Moment {i}")
+            lines += ["[CHAPTER]", "TIMEBASE=1/1000", f"START={pts[i] * 1000}", f"END={max(pts[i] + 1, pts[i + 1]) * 1000}",
+                      "title=" + re.sub(r"[=;#\\\n]", " ", str(title))[:80]]
+        metafile = out_dir / f".{stem}.chapters.txt"
+        metafile.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        meta_in, meta_map = ["-i", str(metafile)], ["-map_chapters", "1"]
+    mp4 = out_dir / f"{stem}.mp4"
+    k = 2
+    while mp4.exists():
+        mp4, k = out_dir / f"{stem} ({k}).mp4", k + 1
+    try:
+        hevc = _vcodec(raw) in ("hevc", "h265")
+        _ffmpeg(["ffmpeg", "-y", "-v", "error", "-f", "flv", "-i", str(raw), *meta_in, "-map", "0", *meta_map, "-c", "copy",
+                 *(["-tag:v", "hvc1"] if hevc else []), "-movflags", "+faststart", str(mp4)], timeout=3 * 3600)
+        raw.unlink(missing_ok=True)
+        saved = mp4
+    except Exception:  # noqa: BLE001   could not convert: keep the raw recording rather than lose it
+        app.logger.exception("Live remux failed for @%s", user)
+        saved = raw.with_name(f"{stem}.flv")
+        raw.replace(saved)
+    if metafile is not None:
+        metafile.unlink(missing_ok=True)
+    fs_dirty()
+    el = int(time.time() - started)
+    moments = f" · {len(marks)} ⭐ moment{'s' if len(marks) != 1 else ''}" if marks else ""
+    why = {"stopped": "you stopped it", "time": "time limit reached", "disk": "the disk is almost full"}.get(reason, "the live ended")
+    rel = saved.relative_to(folder).as_posix()
+    took = f"{el // 3600}h {el // 60 % 60:02d}m" if el >= 3600 else f"{el // 60}m {el % 60:02d}s"
+    finish_ok(job, [rel], message=f"Saved {took} of @{user}'s live ({human(saved.stat().st_size)}){moments} - {why}.")
+    return None
+
+
+def start_live(user, silent=False):
+    """Start recording @user now (in its own thread - a live cannot wait in the download queue). Returns (job, error)."""
+    key = user.lower()
+    with live_lock:
+        jid = live_now.get(key)
+        if jid and (jobs.get(jid) or {}).get("status") in ("queued", "running"):
+            return jobs[jid], None                         # already recording: hand back the same job
+        job = {"id": uuid.uuid4().hex[:12], "category": "tiktok", "label": f"🔴 @{user} LIVE", "status": "queued",
+               "progress": 0, "message": "Starting…", "speed": "", "eta": "", "files": [], "fresh": [], "created": time.time(),
+               "finished": None, "batch": None, "silent": silent, "live": True}
+        cancel = threading.Event()
+        with lock:
+            jobs[job["id"]], cancels[job["id"]] = job, cancel
+        live_now[key] = job["id"]
+    with wlock:                                           # remember when they go live -> "usually live around …"
+        for w in watches.values():
+            if w["kind"] == "tiktok_live" and w["target"].lower() == key:
+                w["live_starts"] = (w.get("live_starts") or [])[-39:] + [int(time.time())]
+                _save(WATCH_FILE, watches)
+
+    def run():
+        try:
+            _run_safely(tiktok_live_worker, job, user, cancel)
+        finally:
+            with live_lock:
+                if live_now.get(key) == job["id"]:
+                    live_now.pop(key, None)
+        if silent and job["status"] == "done":                 # started by the watchlist: say it was saved
+            notify(f"⏺ Saved @{user}'s live", str(job.get("message") or "")[:200], ["movie_camera"])
+    threading.Thread(target=run, daemon=True, name=f"live-{key}").start()
+    return job, None
+
+
+def live_user_from(target):
+    m = TT_LIVE_RE.match(target or "")
+    return m.group(1) if m else None
+
+
+def _live_rec_view(j):
+    return {"id": j["id"], "user": j.get("live_user") or "", "title": j.get("live_title") or "", "started": j.get("rec_started"),
+            "secs": j.get("rec_secs", 0), "size": j.get("rec_size", 0), "size_h": human(j.get("rec_size", 0)),
+            "speed": j.get("speed", ""), "viewers": j.get("viewers"), "peak": j.get("peak") or 0,
+            "status": j["status"], "message": j.get("message", ""), "cover": j.get("cover") or "",
+            "quality": j.get("quality") or "", "marks": len(j.get("marks") or [])}
+
+
+def live_habit(starts):
+    """'Usually live around 21:00 · Fri, Sat' once we have seen 3+ lives (server's local time)."""
+    if len(starts or []) < 3:
+        return ""
+    lt = [time.localtime(t) for t in starts]
+    hours = [0] * 24
+    for t in lt:
+        for d, wgt in ((-1, 1), (0, 2), (1, 1)):          # smooth: 20:55 and 21:05 count as the same habit
+            hours[(t.tm_hour + d) % 24] += wgt
+    h = max(range(24), key=lambda i: hours[i])
+    days = {}
+    for t in lt:
+        days[t.tm_wday] = days.get(t.tm_wday, 0) + 1
+    top = [d for d, n in sorted(days.items(), key=lambda x: -x[1]) if n >= 2][:3]
+    names = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+    return f"Usually live around {h:02d}:00" + (" · " + ", ".join(names[d] for d in sorted(top)) if top else "")
+
+
+@app.route("/live/overview")
+def live_overview():
+    """Everything the Live page shows except the saved files (those need the file password: /fs/lives)."""
+    with live_lock:
+        ids = list(live_now.values())
+    with lock:
+        recs = [_live_rec_view(jobs[i]) for i in ids if i in jobs and jobs[i]["status"] in ("queued", "running")]
+    by_user = {r["user"].lower(): r for r in recs}
+    with wlock:
+        ws = [dict(w) for w in watches.values() if w["kind"] == "tiktok_live"]
+    accounts = [{"id": w["id"], "user": w["target"], "enabled": w["enabled"], "interval": w.get("interval", 5),
+                 "last_check": w.get("last_check"), "next_check": w.get("next_check"), "busy": w.get("busy", False),
+                 "last_status": w.get("last_status", ""), "total": w.get("total_new", 0),
+                 "recording": by_user.get(w["target"].lower()), "habit": live_habit(w.get("live_starts")),
+                 "lives_seen": len(w.get("live_starts") or [])} for w in sorted(ws, key=lambda w: w["created"])]
+    return jsonify(success=True, accounts=accounts, recording=recs, intervals=LIVE_INTERVALS + INTERVALS[:2],
+                   quality=settings.get("live_quality", "best"),
+                   helper=settings.get("live_helper", True), max_hours=settings.get("live_max_hours", 6),
+                   ready=_cffi is not None, now=time.time())
+
+
+@app.route("/live/<job_id>/mark", methods=["POST"])
+def live_mark(job_id):
+    """⭐ Mark this moment of a running recording - it becomes a chapter in the saved MP4."""
+    with lock:
+        j = jobs.get(job_id)
+        if not j or not j.get("live") or j["status"] != "running" or not j.get("rec_started"):
+            return jsonify(success=False, message="That recording is not running."), 404
+        if len(j.setdefault("marks", [])) >= 200:
+            return jsonify(success=False, message="That is a lot of moments - 200 is the limit."), 400
+        t = int(time.time() - j["rec_started"])
+        note = re.sub(r"\s+", " ", str(json_body().get("note") or "")).strip()[:80]
+        j["marks"].append({"t": t, "note": note})
+        n = len(j["marks"])
+    return jsonify(success=True, t=t, count=n)
+
+
+@app.route("/fs/lives")
+def fs_lives():
+    """Saved live recordings, newest first (needs the file password like the rest of /fs/)."""
+    root, out = BASE_DIR / "tiktok", []
+    if root.is_dir():
+        for f in root.glob("*/lives/*"):
+            if not f.is_file() or is_partial(f.name) or f.suffix.lower() not in (".mp4", ".flv"):
+                continue
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            rel = fs_rel(f)
+            with mlock:
+                dur = (media_meta.get(rel) or {}).get("d") or 0
+            out.append({"path": rel, "user": f.parent.parent.name, "name": f.name, "size": st.st_size, "size_h": human(st.st_size),
+                        "modified": st.st_mtime, "duration": dur})
+    out.sort(key=lambda x: -x["modified"])
+    total = sum(x["size"] for x in out)
+    return jsonify(success=True, items=out[:300], count=len(out), total_h=human(total),
+                   hours=round(sum(x["duration"] for x in out) / 3600, 1))
+
+
+@app.route("/live/status")
+def live_status_api():
+    user = (request.args.get("user") or "").lstrip("@")
+    if not TT_USER_RE.match(user):
+        return jsonify(success=False, message="Enter a TikTok username."), 400
+    try:
+        st = tt_live_status(user)
+    except LiveError as exc:
+        return jsonify(success=False, message=str(exc)), 502
+    with live_lock:
+        st["recording"] = live_now.get(user.lower())
+    return jsonify(success=True, **st)
 
 
 @app.route("/job/<job_id>")
@@ -2658,12 +3123,45 @@ def channel_worker(job, w, cancel):
     finish_ok(job, files, fxnote or (f"{len(files)} new video(s)" if files else "Nothing new"), fresh=files)
 
 
+def run_live_watch(w):
+    """A TikTok LIVE watch: a quick 'are they live?' check; when they are, recording starts by itself."""
+    user, status, started = w["target"], "", False
+    try:
+        with live_lock:
+            jid = live_now.get(user.lower())
+        if jid and (jobs.get(jid) or {}).get("status") in ("queued", "running"):
+            status = "🔴 Recording now"
+        elif tt_live_status(user)["live"]:
+            start_live(user, silent=True)
+            started, status = True, "🔴 Went live - recording"
+        else:
+            status = "Not live"
+    except LiveError as exc:
+        status = "⚠️ " + str(exc)[:200]
+    except Exception:  # noqa: BLE001
+        app.logger.exception("Live check crashed for @%s", user)
+        status = "⚠️ The live check failed - it will try again."
+    finally:
+        with wlock:
+            w["busy"] = False
+            w["last_check"] = time.time()
+            w["next_check"] = time.time() + w.get("interval", 5) * 60
+            w["last_status"] = status
+            w["last_new"] = 1 if started else 0
+            w["total_new"] = w.get("total_new", 0) + (1 if started else 0)
+            _save(WATCH_FILE, watches)
+    if started:
+        notify(f"🔴 @{user} is live", "Media Hub started recording it.", ["red_circle"])
+
+
 def run_watch(wid):
     """One scheduled check of one watched account (runs in the thread pool). Never leaves a watch 'busy'."""
     with wlock:
         w = watches.get(wid)
     if not w:
         return
+    if w["kind"] == "tiktok_live":
+        return run_live_watch(w)
     new = []
     job = {"status": "error", "message": "The check could not start.", "fresh": []}     # placeholder until the real job exists
     cancel = threading.Event()
@@ -2789,12 +3287,25 @@ def scheduler_loop():
 def watches_api():
     if request.method == "GET":
         with wlock:
-            return jsonify(success=True, intervals=INTERVALS,
-                           watches=sorted((dict(w) for w in watches.values()), key=lambda w: w["created"]))
+            out = sorted((dict(w) for w in watches.values()), key=lambda w: w["created"])
+        for w in out:
+            if w["kind"] == "tiktok_live":
+                with live_lock:
+                    j = jobs.get(live_now.get(w["target"].lower()) or "")
+                if j and j["status"] in ("queued", "running"):
+                    w["rec"] = {"id": j["id"], "message": j.get("message", ""), "secs": j.get("rec_secs", 0),
+                                "size_h": human(j.get("rec_size", 0))}
+        return jsonify(success=True, intervals=INTERVALS, live_intervals=LIVE_INTERVALS + INTERVALS[:2], watches=out)
     d = json_body()
     kind, target = d.get("kind"), str(d.get("target") or "").strip()
     interval = d.get("interval") if d.get("interval") in INTERVALS else 60
-    if kind == "snapchat":
+    if kind == "tiktok_live":
+        target = live_user_from(target) or target.lstrip("@")
+        if not TT_USER_RE.match(target):
+            return jsonify(success=False, message="Enter a TikTok username or a tiktok.com/@user/live link."), 400
+        key, label, category = f"tiktok_live:{target.lower()}", f"🔴 @{target}", "tiktok"
+        interval = d.get("interval") if d.get("interval") in LIVE_INTERVALS + INTERVALS else 5
+    elif kind == "snapchat":
         target = target.lstrip("@")
         if not SNAP_USER_RE.match(target):
             return jsonify(success=False, message="Invalid Snapchat username."), 400
@@ -2843,7 +3354,7 @@ def watch_action(wid, action):
                 iv = int(json_body().get("interval"))
             except (TypeError, ValueError):
                 iv = None
-            if iv not in INTERVALS:
+            if iv not in (LIVE_INTERVALS + INTERVALS if w["kind"] == "tiktok_live" else INTERVALS):
                 return jsonify(success=False, message="Choose one of: " + ", ".join(map(str, INTERVALS)) + " minutes."), 400
             w["interval"] = iv
             if w.get("last_check"):                          # count from the last check (due now if that is already past)
@@ -2890,6 +3401,15 @@ def settings_api():
                 return jsonify(success=False, message="Retries must be a number from 0 to 10."), 400
         if "clean_urls" in d:
             settings["clean_urls"] = bool(d["clean_urls"])
+        if "live_helper" in d:
+            settings["live_helper"] = bool(d["live_helper"])
+        if d.get("live_quality") in LIVE_QUALITY_ORDER:
+            settings["live_quality"] = d["live_quality"]
+        if "live_max_hours" in d:
+            try:
+                settings["live_max_hours"] = max(1, min(24, int(d["live_max_hours"])))
+            except (TypeError, ValueError):
+                return jsonify(success=False, message="Live time limit must be 1-24 hours."), 400
         if d.get("digest") in ("off", "daily"):
             settings["digest"] = d["digest"]
             if d["digest"] == "off":                      # going back to instant alerts: don't keep a stale backlog
@@ -2912,6 +3432,8 @@ def settings_api():
                    name_template=settings.get("name_template", ""), speed_limit=settings.get("speed_limit", "0"),
                    parallel_parts=settings.get("parallel_parts", 1), pace=settings.get("pace", "off"),
                    retry_count=settings.get("retry_count", 3), clean_urls=settings.get("clean_urls", True),
+                   live_helper=settings.get("live_helper", True), live_max_hours=settings.get("live_max_hours", 6),
+                   live_ready=_cffi is not None, live_quality=settings.get("live_quality", "best"),
                    digest=settings.get("digest", "off"), digest_hour=settings.get("digest_hour", 20),
                    digest_waiting=sum(e.get("count", 0) for e in _load(DIGEST_FILE, {}).get("pending", {}).values()),
                    ig_cap=ig_cap())

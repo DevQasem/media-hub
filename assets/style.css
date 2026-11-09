@@ -875,3 +875,143 @@ html[data-scheme="light"] .tg-smart { color:#b45309; }
 .clrow { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; }
 .clrow em { font-style:normal; font-size:.78rem; color:var(--mute); } .clrow .btn { padding:8px 12px; font-size:.8rem; color:var(--text); }
 .clrow .btn:not(:disabled):hover { box-shadow:inset 0 0 0 1px var(--err); color:var(--err); }
+
+/* ================= TikTok LIVE recording ================= */
+.recdot, .recnow { color:#ff4d5e; font-weight:900; letter-spacing:.04em; }
+html[data-scheme="light"] .recdot, html[data-scheme="light"] .recnow { color:#c8102e; }
+.recdot { font-size:.7rem; animation:blink 1.4s infinite; }
+.fav.rec { box-shadow:0 0 0 2px #ff4d5e, 0 0 16px rgba(255,77,94,.45); animation:recpulse 1.6s ease-in-out infinite; }
+@keyframes recpulse { 50% { box-shadow:0 0 0 2px #ff4d5e, 0 0 4px rgba(255,77,94,.2); } }
+.qrow.q-live.q-running { border-color:rgba(255,77,94,.5); background:color-mix(in srgb,#ff4d5e 8%,var(--field2)); }
+
+/* ================= Live page ================= */
+.view-live { display:none; }
+body[data-tab="live"] .view-live { display:block; animation:rise .35s var(--ease); }
+body[data-tab="live"] .view-home { display:none; }
+.livepage { padding-top:6px; }
+.lvhead { display:flex; align-items:flex-end; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:14px; }
+.lvhead h2 { margin:0; font-size:1.6rem; letter-spacing:-.02em; }
+.lvstats { display:flex; gap:6px; flex-wrap:wrap; }
+.lvstat { display:inline-flex; align-items:baseline; gap:5px; padding:6px 12px; border:1px solid var(--line); border-radius:99px; background:var(--card); font-size:.78rem; color:var(--mute); }
+.lvstat b { font-size:1rem; color:var(--text); font-variant-numeric:tabular-nums; }
+.lvstat.hot { border-color:rgba(255,77,94,.5); } .lvstat.hot b { color:#ff4d5e; }
+.lvadd { display:flex; gap:8px; flex-wrap:wrap; padding:10px; border:1px solid var(--line); border-radius:18px; background:var(--card); box-shadow:inset 0 1px 0 var(--hi,transparent); }
+.lvadd input { flex:1 1 220px; min-width:0; padding:11px 13px; border:1px solid var(--line); border-radius:12px; background:var(--field); color:var(--text); font:inherit; font-size:.95rem; outline:0; }
+.lvadd input:focus { border-color:var(--pc-ink); box-shadow:0 0 0 3px color-mix(in srgb,var(--pc) 18%,transparent); }
+.lvadd .btn { padding:10px 16px; font-size:.88rem; color:#fff; } .lvadd .btn.ghost { color:var(--text); }
+.lvsec { margin:22px 2px 10px; } .lvsec em { font-style:normal; font-size:.78rem; color:var(--mute); font-weight:600; }
+.lvrec, .lvacc { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr)); gap:10px; }
+.lvcard { padding:14px; border:1px solid var(--line); border-radius:18px; background:var(--card); box-shadow:inset 0 1px 0 var(--hi,transparent); min-width:0; }
+.lvrecc { border-color:rgba(255,77,94,.45); background:linear-gradient(160deg,color-mix(in srgb,#ff4d5e 10%,var(--card)),var(--card) 60%); }
+.lvtop { display:flex; align-items:center; gap:10px; min-width:0; }
+.lvav { flex:0 0 38px; height:38px; display:grid; place-items:center; border-radius:50%; font-weight:800; color:#fff; background:linear-gradient(135deg,hsl(var(--h) 70% 52%),hsl(calc(var(--h) + 40) 70% 42%)); }
+.lvwho { flex:1; min-width:0; display:flex; flex-direction:column; }
+.lvwho b { font-size:.95rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .lvwho small { font-size:.74rem; color:var(--mute); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.lvnums { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin:14px 0 12px; }
+.lvnums div { display:flex; flex-direction:column; gap:1px; padding:8px 10px; border-radius:12px; background:var(--field2); }
+.lvnums em { font-style:normal; font-size:.66rem; text-transform:uppercase; letter-spacing:.07em; color:var(--mute); font-weight:700; }
+.lvnums b { font-size:1rem; font-variant-numeric:tabular-nums; white-space:nowrap; } .lvnums small { font-size:.66rem; color:var(--mute); }
+.lvbtns { display:flex; gap:8px; flex-wrap:wrap; } .lvbtns .btn { flex:1 1 auto; padding:9px 12px; font-size:.84rem; color:var(--text); text-align:center; text-decoration:none; }
+.lvdanger:hover:not(:disabled) { box-shadow:inset 0 0 0 1px #ff4d5e; color:#ff4d5e; }
+.lvchip { flex-shrink:0; padding:3px 10px; border-radius:99px; font-size:.72rem; font-weight:800; background:var(--card2); color:var(--mute); }
+.lvchip.c-rec { background:rgba(255,77,94,.16); color:#ff4d5e; animation:blink 1.6s infinite; } .lvchip.c-warn { background:rgba(251,191,36,.16); color:var(--amber); }
+.lvchip.c-chk { color:var(--cyan); } .lvchip.c-off { opacity:.7; }
+.lvaccc.s-rec { border-color:rgba(255,77,94,.4); } .lvaccc.s-off { opacity:.72; }
+.lvmeta { margin:10px 0; font-size:.76rem; color:var(--mute); overflow-wrap:anywhere; }
+.lvctl { display:flex; gap:6px; flex-wrap:wrap; align-items:center; } .lvctl .wsel { padding:6px 8px; font-size:.78rem; } .lvctl a.mini { display:inline-block; }
+.lvempty { padding:18px; border:1px dashed var(--line); border-radius:16px; color:var(--mute); font-size:.86rem; text-align:center; grid-column:1 / -1; }
+.lvlock .btn { margin-left:8px; padding:7px 14px; font-size:.82rem; color:var(--text); }
+.lvfilter { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px; }
+.lvfilter button { padding:5px 12px; border:1px solid var(--line); border-radius:99px; background:none; color:var(--mute); font:inherit; font-size:.78rem; cursor:pointer; }
+.lvfilter button.on { background:var(--grad); color:#fff; border-color:transparent; }
+.lvlist { display:flex; flex-direction:column; gap:6px; }
+.lvrow { display:grid; grid-template-columns:38px minmax(0,1fr) 5rem 5.5rem auto; align-items:center; gap:12px; padding:9px 12px; border:1px solid var(--line); border-radius:14px; background:var(--card); }
+.lvdur, .lvsize { font-size:.82rem; color:var(--mute); font-variant-numeric:tabular-nums; text-align:right; }
+@media (max-width:560px) {
+  .lvrow { grid-template-columns:38px minmax(0,1fr) auto; } .lvrow .lvdur { display:none; } .lvrow .lvctl { grid-column:1 / -1; justify-content:flex-end; }
+  .lvnums { grid-template-columns:repeat(2,minmax(0,1fr)); } .lvadd .btn { flex:1 1 40%; }
+}
+@media (max-width:1099px) { .tabind { width:calc((100% - 12px) / 5); } }
+
+/* ================= Live page: TikTok look =================
+   TikTok's own pair of colours (cyan #25f4ee + red #fe2c55) on near-black, the "split" logo glow,
+   a spinning LIVE ring on avatars and an equaliser while recording. Light mode keeps the accents, swaps the black. */
+.livepage { --tt-c:#25f4ee; --tt-r:#fe2c55; --tt-bg:rgba(10,10,14,.78); --tt-card:rgba(22,22,28,.86); --tt-line:rgba(255,255,255,.08); position:relative; }
+html[data-scheme="light"] .livepage { --tt-c:#0aa7a2; --tt-r:#e5174a; --tt-bg:rgba(255,255,255,.9); --tt-card:#ffffff; --tt-line:rgba(20,20,30,.1); }
+.livepage::before { content:""; position:absolute; inset:-30px -20px auto; height:260px; z-index:-1; pointer-events:none; border-radius:40px;
+  background:radial-gradient(40% 70% at 20% 30%,color-mix(in srgb,var(--tt-c) 22%,transparent),transparent 70%),radial-gradient(40% 70% at 80% 20%,color-mix(in srgb,var(--tt-r) 22%,transparent),transparent 70%);
+  filter:blur(10px); animation:ttglow 9s ease-in-out infinite alternate; }
+@keyframes ttglow { to { transform:translateX(24px) scale(1.05); opacity:.8; } }
+
+/* headline with TikTok's offset cyan/red edges */
+.lvhead h2 { font-size:clamp(1.6rem,4vw,2.1rem); font-weight:900; letter-spacing:-.03em; text-shadow:-2px -1px 0 var(--tt-c), 2px 1px 0 var(--tt-r); animation:ttsplit 4s ease-in-out infinite; }
+@keyframes ttsplit { 0%,86%,100% { text-shadow:-2px -1px 0 var(--tt-c), 2px 1px 0 var(--tt-r); } 90% { text-shadow:-4px 0 0 var(--tt-c), 4px 1px 0 var(--tt-r); transform:skewX(-3deg); } 94% { text-shadow:1px -2px 0 var(--tt-c), -2px 2px 0 var(--tt-r); transform:none; } }
+html[data-scheme="light"] .lvhead h2 { color:#111; }
+
+.lvstat { background:var(--tt-card); border-color:var(--tt-line); animation:rise .5s var(--ease) backwards; }
+.lvstat:nth-child(2) { animation-delay:.05s; } .lvstat:nth-child(3) { animation-delay:.1s; } .lvstat:nth-child(4) { animation-delay:.15s; } .lvstat:nth-child(5) { animation-delay:.2s; }
+.lvstat.hot { border-color:color-mix(in srgb,var(--tt-r) 55%,transparent); box-shadow:0 0 18px color-mix(in srgb,var(--tt-r) 30%,transparent); } .lvstat.hot b { color:var(--tt-r); }
+.lvqpill { color:var(--tt-c); font-weight:700; border-color:color-mix(in srgb,var(--tt-c) 35%,transparent); }
+
+/* add bar: the two TikTok buttons */
+.lvadd { background:var(--tt-bg); border-color:var(--tt-line); backdrop-filter:blur(12px); }
+.lvadd input:focus { border-color:var(--tt-c); box-shadow:0 0 0 3px color-mix(in srgb,var(--tt-c) 22%,transparent); }
+#lvRecBtn { background:var(--tt-r); box-shadow:0 8px 24px color-mix(in srgb,var(--tt-r) 40%,transparent); }
+#lvRecBtn:hover { box-shadow:-3px -2px 0 var(--tt-c), 0 10px 28px color-mix(in srgb,var(--tt-r) 50%,transparent); }
+#lvWatchBtn { box-shadow:inset 0 0 0 1.5px var(--tt-c); }
+#lvWatchBtn:hover { background:color-mix(in srgb,var(--tt-c) 14%,transparent); }
+
+/* cards */
+.lvcard { position:relative; overflow:hidden; background:var(--tt-card); border-color:var(--tt-line); animation:rise .5s var(--ease) backwards; animation-delay:calc(var(--i,0) * 70ms); transition:transform .25s var(--ease), box-shadow .25s; }
+.lvcard:hover { transform:translateY(-3px); box-shadow:-3px -3px 0 -1px color-mix(in srgb,var(--tt-c) 60%,transparent), 3px 3px 0 -1px color-mix(in srgb,var(--tt-r) 60%,transparent), 0 16px 40px var(--shadow); }
+.lvcard > * { position:relative; z-index:1; }
+
+/* recording card: spinning cyan->red border, blurred cover behind */
+.lvrecc { border-color:transparent; background:var(--tt-card); }
+.lvrecc::before { content:""; position:absolute; inset:0; z-index:0; border-radius:inherit; padding:1.5px; pointer-events:none;
+  background:conic-gradient(from var(--ang),var(--tt-c),var(--tt-r),transparent 55%,var(--tt-c)); -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0); -webkit-mask-composite:xor; mask-composite:exclude; animation:spinang 3.5s linear infinite; }
+.lvcover { position:absolute !important; inset:0; z-index:0 !important; background:center/cover no-repeat; opacity:.22; filter:blur(18px) saturate(1.4); transform:scale(1.2); }
+html[data-scheme="light"] .lvcover { opacity:.14; }
+.recdot { color:var(--tt-r); text-shadow:0 0 12px color-mix(in srgb,var(--tt-r) 60%,transparent); }
+.lvq { display:inline-block; margin:10px 0 -4px; padding:2px 10px; border-radius:99px; font-size:.7rem; font-weight:800; color:var(--tt-c); background:color-mix(in srgb,var(--tt-c) 12%,transparent); }
+.lvnums div { background:color-mix(in srgb,var(--text) 5%,transparent); }
+.lvnums .lvtime { color:var(--tt-r); }
+.lvmark em { font-style:normal; margin-left:4px; padding:0 7px; border-radius:99px; background:#fbbf24; color:#1b1300; font-size:.72rem; }
+.lvmark.pop { animation:badgePop .45s var(--ease); }
+.lvmark:hover { box-shadow:inset 0 0 0 1px #fbbf24 !important; }
+
+/* equaliser bars while recording */
+.lveq { display:inline-flex; align-items:flex-end; gap:2px; height:16px; margin-right:2px; }
+.lveq i { width:3px; border-radius:2px; background:linear-gradient(var(--tt-c),var(--tt-r)); animation:lveq .9s ease-in-out infinite; }
+.lveq i:nth-child(2) { animation-delay:-.3s; } .lveq i:nth-child(3) { animation-delay:-.6s; } .lveq i:nth-child(4) { animation-delay:-.15s; }
+@keyframes lveq { 0%,100% { height:4px; } 50% { height:16px; } }
+
+/* avatars: TikTok LIVE ring + tag */
+.lvav { position:relative; overflow:visible; }
+.lvav > span { position:relative; z-index:1; }
+.lvav.on { background:none; }
+.lvav.on::before { content:""; position:absolute; inset:-4px; border-radius:50%; background:conic-gradient(from var(--ang),var(--tt-r),#ff7a9a,var(--tt-r),var(--tt-c),var(--tt-r)); animation:spinang 2.4s linear infinite; z-index:0; }
+.lvav.on::after { content:""; position:absolute; inset:-1.5px; border-radius:50%; background:var(--tt-card); z-index:0; }
+.lvav.on > span { width:100%; height:100%; display:grid; place-items:center; border-radius:50%; background:linear-gradient(135deg,hsl(var(--h) 70% 52%),hsl(calc(var(--h) + 40) 70% 42%)); }
+.lvav i { position:absolute; left:50%; bottom:-7px; z-index:2; transform:translateX(-50%); padding:0 5px; border-radius:4px; background:var(--tt-r); color:#fff; font-style:normal; font-size:.5rem; font-weight:900; letter-spacing:.05em; line-height:13px; animation:lvtag 1.6s ease-in-out infinite; }
+@keyframes lvtag { 50% { transform:translateX(-50%) scale(1.12); } }
+
+/* account cards */
+.lvaccc.s-rec { box-shadow:0 0 0 1px color-mix(in srgb,var(--tt-r) 45%,transparent), 0 10px 30px color-mix(in srgb,var(--tt-r) 14%,transparent); }
+.lvchip.c-rec { background:color-mix(in srgb,var(--tt-r) 16%,transparent); color:var(--tt-r); }
+.lvchip.c-chk { color:var(--tt-c); background:color-mix(in srgb,var(--tt-c) 12%,transparent); }
+.lvchip.c-chk::before { content:""; display:inline-block; width:8px; height:8px; margin-right:5px; border-radius:50%; border:2px solid currentColor; border-right-color:transparent; vertical-align:-1px; animation:spin .8s linear infinite; }
+.lvhabit { display:inline-block; margin-top:5px; color:var(--tt-c); font-weight:600; }
+.lvempty { border-color:color-mix(in srgb,var(--tt-c) 25%,var(--tt-line)); background:color-mix(in srgb,var(--tt-c) 3%,transparent); }
+
+/* saved lives with thumbnails */
+.lvrow { grid-template-columns:64px minmax(0,1fr) 5rem 5.5rem auto; background:var(--tt-card); border-color:var(--tt-line); animation:rise .4s var(--ease) backwards; transition:transform .2s var(--ease), border-color .2s; }
+.lvrow:hover { transform:translateX(3px); border-color:color-mix(in srgb,var(--tt-c) 40%,var(--tt-line)); }
+.lvthumb { position:relative; width:64px; height:42px; border-radius:9px; overflow:hidden; background:linear-gradient(135deg,color-mix(in srgb,var(--tt-c) 40%,#111),color-mix(in srgb,var(--tt-r) 40%,#111)); display:grid; place-items:center; }
+.lvthumb img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+.lvthumb span { position:relative; color:#fff; font-size:.8rem; text-shadow:0 1px 4px rgba(0,0,0,.6); }
+.lvfilter button.on { background:var(--tt-r); }
+@media (max-width:560px) { .lvrow { grid-template-columns:64px minmax(0,1fr) auto; } }
+
+/* the Live badge in the side menu and tab bar uses TikTok red */
+#rnLive, #tbLive { background:#fe2c55 !important; color:#fff !important; }

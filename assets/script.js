@@ -152,7 +152,7 @@ function onUrlInput() {
   $('clearBtn').style.display = v ? '' : 'none'; $('pasteBtn').style.display = v ? 'none' : '';
   ['preview', 'snapbox', 'igbox'].forEach(id => $(id).classList.remove('show'));
   ['actions', 'watchrow'].forEach(id => $(id).classList.remove('show'));
-  AppState.chanUrl = ''; setHint(''); AppState.mode = null; AppState.noPreview = false; $('platforms').style.display = v ? 'none' : '';
+  AppState.chanUrl = ''; setHint(''); AppState.mode = null; AppState.noPreview = false; AppState.liveUser = null; liveWint(false); $('platforms').style.display = v ? 'none' : '';
   if (v && document.body.dataset.tab === 'watch') setTab('home');
   if (v) hideClip(); else { closeCustom(); setBrand('other'); setOpts({}); }
   const c = classify(v);
@@ -185,7 +185,9 @@ function sxPane(n) {
 }
 function openSettings(sec) { $('smodal').classList.add('open'); sxPane(typeof sec === 'string' ? sec : SX.pane); }
 function setTab(t) {
-  document.body.dataset.tab = t; $('tabbar').style.setProperty('--ti', t === 'watch' ? 1 : 0);
+  document.body.dataset.tab = t; $('tabbar').style.setProperty('--ti', ({home:0, live:1, watch:2})[t] || 0);
+  if (t === 'live') { lvOpen(); setColor('#25f4ee'); } else { lvClose(); if (document.body.dataset.wasLive) applyUi(); }
+  document.body.dataset.wasLive = t === 'live' ? '1' : '';
   document.querySelectorAll('.tabbar [data-tab]').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
   document.querySelectorAll('#rail [data-nav]').forEach(b => b.classList.toggle('on', b.dataset.nav === t));
   if (window.scrollTo) window.scrollTo({top:0, behavior:'smooth'});
@@ -242,8 +244,10 @@ async function plGo() {
   toast(`${r.job_ids.length} queued` + (r.errors && r.errors.length ? ` · ${r.errors.length} skipped` : '')); watch();
 }
 
+const LIVE_RE = /^https?:\/\/(?:www\.|m\.)?tiktok\.com\/@([A-Za-z0-9._-]{2,24})\/live\b/i;
 function videoPreview(url) {
   AppState.mode = 'video'; AppState.videoUrl = url;
+  const lm = url.match(LIVE_RE); AppState.liveUser = lm ? lm[1] : null; AppState.liveOn = null; liveWint(!!lm);
   const d = detect(url); setBrand(d.key); $('actions').classList.add('show');
   AppState.timer = setTimeout(async () => {
     const mine = ++AppState.seq;
@@ -256,6 +260,7 @@ function videoPreview(url) {
     if (mine !== AppState.seq) return;
     if (!r.success) { $('preview').classList.remove('show'); AppState.noPreview = true; refreshOpts(); return setHint((r.error || 'No preview for this link.') + ' You can still try the download.', true); }
     if (r.gallery) return igCard(r, d);
+    if (r.live) return liveCard(r);
 
     setHint(''); $('siteBadge').textContent = r.site || d.name;
     AppState.chanUrl = r.channel_url || ''; AppState.chanName = r.uploader || '';
@@ -396,6 +401,11 @@ function updateGo(o, lk) {
   if (AppState.mode === 'snap') {
     label = 'Download all stories'; sub = 'Public stories · saved in snapchat/';
   }
+  else if (AppState.liveUser) {
+    label = AppState.liveOn === false ? 'Not live right now' : 'Record live';
+    sub = AppState.liveOn === false ? 'Press Watch below to record when they go live' : AppState.liveOn ? `Until the live ends or you stop it · tiktok/${AppState.liveUser}/lives/` : 'Checking if they are live…';
+    icon = '🔴';
+  }
   else if (AppState.mode === 'ig') {
     label = 'Download from Instagram'; sub = 'Original quality · saved in instagram/';
   }
@@ -487,7 +497,8 @@ function startVideo(audio) {
   const options = getOpts();
   if (AppState.mode === 'ig') options.kind = 'video';
   else if (audio) options.kind = 'audio';
-  run({action_type:'url', target:AppState.videoUrl, options}, AppState.mode === 'ig' ? 'Fetching from Instagram…' : options.kind === 'audio' ? 'Extracting audio…' : 'Downloading…');
+  if (AppState.liveUser && AppState.liveOn === false) return toast(`@${AppState.liveUser} is not live - press Watch to record automatically`);
+  run({action_type:'url', target:AppState.videoUrl, options}, AppState.liveUser ? `🔴 Recording @${AppState.liveUser}'s live…` : AppState.mode === 'ig' ? 'Fetching from Instagram…' : options.kind === 'audio' ? 'Extracting audio…' : 'Downloading…');
 }
 
 function startSnap() {
@@ -505,11 +516,12 @@ async function run(payload, title) {
 function openProgress(title) {
   AppState.resultOpen = false; $('modal').classList.add('open'); $('m-load').style.display = ''; $('m-res').style.display = 'none';
   $('ltitle').textContent = title; $('bar').style.width = '0'; setRing(0); $('lmsg').textContent = 'Starting…'; $('lmeta').textContent = ''; $('cancelBtn').disabled = false;
+  $('cancelBtn').textContent = /Recording .*live/.test(title) ? '⏹ Stop & save' : 'Cancel';
 }
 function setRing(p) { p = Math.max(0, Math.min(100, +p || 0)); $('mring').style.setProperty('--p', p); $('mpct').textContent = Math.round(p) + '%'; $('mring').classList.toggle('ind', p < 1); }
 function updateProgress(j) { setRing(j.progress); $('bar').style.width = j.progress + '%'; $('lmsg').textContent = j.message; $('lmeta').textContent = [j.speed, j.eta && 'ETA ' + j.eta].filter(Boolean).join('  ·  '); }
 function hideProgress() { $('modal').classList.remove('open'); AppState.viewing = null; toast('Running in the background - a popup will tell you when it is done'); }
-async function cancelJob() { if (!AppState.viewing) return; $('cancelBtn').disabled = true; $('lmsg').textContent = 'Cancelling…'; await api('/cancel/' + AppState.viewing, {method:'POST'}); }
+async function cancelJob() { if (!AppState.viewing) return; $('cancelBtn').disabled = true; $('lmsg').textContent = $('cancelBtn').textContent.includes('Stop') ? 'Stopping and saving…' : 'Cancelling…'; await api('/cancel/' + AppState.viewing, {method:'POST'}); }
 
 /* One polling loop only: watch() is guarded, watchBody() does one poll. */
 async function watch() {
@@ -555,7 +567,7 @@ function redo() {
   if (!AppState.lastRun) return; closeResult();
   const p = JSON.parse(JSON.stringify(AppState.lastRun.payload)); p.options = Object.assign({}, p.options, {force:true}); run(p, AppState.lastRun.title);
 }
-function peek(id) { const j = AppState.lastRunning.find(x => x.id === id); if (!j) return; AppState.viewing = id; openProgress(j.label); updateProgress(j); }
+function peek(id) { const j = AppState.lastRunning.find(x => x.id === id); if (!j) return; AppState.viewing = id; openProgress(j.live ? `🔴 Recording ${j.label.replace(/^🔴 /, '')} live…` : j.label); updateProgress(j); }
 function showNextResult() { if (AppState.resultOpen || !AppState.results.length) return; const j = AppState.results.shift(); if (j.id === AppState.viewing) AppState.viewing = null; showResult(j); }
 function confetti() {
   if (ui.confetti !== '1' || (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches)) return;
@@ -672,11 +684,12 @@ async function loadWatches() {
   $('tbWatch').textContent = on || ''; $('rnWatch').textContent = on || ''; $('pillWatch').textContent = `👁 ${on} watching`; $('pillWatch').classList.toggle('on', on > 0);
   const ivs = d.intervals && d.intervals.length ? d.intervals : [15, 30, 60, 180, 360];
   const html = d.watches.length ? d.watches.map((w, i) => `<div class="file" style="--i:${i}">
-      <span class="fav${w.enabled ? ' live' : ''}">${w.kind === 'snapchat' ? '👻' : '🎬'}</span>
+      <span class="fav${w.enabled ? ' live' : ''}${w.rec ? ' rec' : ''}">${w.kind === 'snapchat' ? '👻' : w.kind === 'tiktok_live' ? '🔴' : '🎬'}</span>
       <div class="fmain"><div class="fname" title="${esc(w.target)}">${esc(w.label)}</div>
-        <div class="fmeta">${w.busy ? '⏳ checking now…' : esc(w.last_status)} · checked ${ago(w.last_check)}${w.enabled ? '' : ' · paused'} · ${w.total_new} downloaded</div></div>
+        <div class="fmeta">${w.rec ? `<b class="recnow">⏺ REC ${fmtDur(w.rec.secs || 0)} · ${esc(w.rec.size_h)}</b>` : w.busy ? '⏳ checking now…' : esc(w.last_status)} · checked ${ago(w.last_check)}${w.enabled ? '' : ' · paused'} · ${w.total_new} ${w.kind === 'tiktok_live' ? 'recorded' : 'downloaded'}</div></div>
       <div class="fctl">
-        <select class="wsel" data-wid="${esc(w.id)}" aria-label="Check how often">${ivs.map(m => `<option value="${m}"${m === w.interval ? ' selected' : ''}>every ${ivLabel(m)}</option>`).join('')}</select>
+        ${w.rec ? `<button class="mini del wact-stop" data-jid="${esc(w.rec.id)}" title="Stop recording and save it">⏹ Stop &amp; save</button>` : ''}
+        <select class="wsel" data-wid="${esc(w.id)}" aria-label="Check how often">${(w.kind === 'tiktok_live' && d.live_intervals ? d.live_intervals : ivs).map(m => `<option value="${m}"${m === w.interval ? ' selected' : ''}>every ${ivLabel(m)}</option>`).join('')}</select>
         <button class="mini wact-check" data-wid="${esc(w.id)}" title="Check this account now">Check</button>
         <button class="mini wact-toggle" data-wid="${esc(w.id)}">${w.enabled ? 'Pause' : 'Resume'}</button>
         <button class="mini del wact-del" data-wid="${esc(w.id)}" aria-label="Stop watching">✕</button></div></div>`).join('')
@@ -689,6 +702,7 @@ async function loadWatches() {
   document.querySelectorAll('.wact-check').forEach(el => el.addEventListener('click', e => wact(e.currentTarget.dataset.wid, 'check')));
   document.querySelectorAll('.wact-toggle').forEach(el => el.addEventListener('click', e => wact(e.currentTarget.dataset.wid, 'toggle')));
   document.querySelectorAll('.wact-del').forEach(el => el.addEventListener('click', e => wdel(e.currentTarget.dataset.wid)));
+  document.querySelectorAll('.wact-stop').forEach(el => el.addEventListener('click', async e => { const b = e.currentTarget; b.disabled = true; await api('/cancel/' + encodeURIComponent(b.dataset.jid), {method:'POST'}); toast('Stopping - the recording is being saved'); lastWatchHtml = ''; setTimeout(loadWatches, 1500); }));
 }
 
 async function addWatch(kind, target, label) {
@@ -697,7 +711,7 @@ async function addWatch(kind, target, label) {
 }
 const watchSnap = () => addWatch('snapchat', AppState.snapUser);
 function watchCreator() { AppState.chanUrl ? addWatch('channel', AppState.chanUrl, AppState.chanName) : toast('No creator link found for this video'); }
-function watchGo() { return AppState.mode === 'snap' ? watchSnap() : watchCreator(); }
+function watchGo() { return AppState.liveUser ? addWatch('tiktok_live', AppState.liveUser) : AppState.mode === 'snap' ? watchSnap() : watchCreator(); }
 async function setWInt(id, v) { const r = await post('/watches/' + encodeURIComponent(id) + '/interval', {interval: +v}); toast(r.success ? `Now checks every ${ivLabel(+v)}` : (r.message || 'Could not change')); lastWatchHtml = ''; loadWatches(); }
 async function wact(id, a) { await api(`/watches/${encodeURIComponent(id)}/${a}`, {method:'POST'}); lastWatchHtml = ''; loadWatches(); }
 async function wdel(id) { if (confirm('Stop watching this account?')) { await api('/watches/' + encodeURIComponent(id), {method:'DELETE'}); lastWatchHtml = ''; loadWatches(); } }
@@ -778,6 +792,8 @@ async function loadSettings() {
   const d = await api('/settings');
   if (d.success) { $('ntfy').value = d.ntfy || ''; $('creatorFolders').checked = d.creator_folders !== false; $('igOrganize').checked = d.ig_organize !== false; $('autoName').value = d.auto_name || 'date'; $('preferH264').checked = d.prefer_h264 !== false; $('notifyDl').checked = !!d.notify_downloads; $('igcap').value = d.ig_cap || 30;
     $('nameTpl').value = d.name_template || ''; $('speedLimit').value = d.speed_limit || '0'; $('parallelParts').value = String(d.parallel_parts || 1); $('paceSel').value = d.pace || 'off'; $('retryCount').value = String(d.retry_count ?? 3); $('cleanUrls').checked = d.clean_urls !== false; tplPreview();
+    if ($('liveQuality')) $('liveQuality').value = d.live_quality || 'best';
+    if ($('liveHelper')) { $('liveHelper').checked = d.live_helper !== false; $('liveMax').value = String(d.live_max_hours || 6); $('liveReady').textContent = d.live_ready === false ? '⚠ curl_cffi is not installed on the server - TikTok will block live checks more often. Rebuild the Docker image.' : ''; }
     if ($('digestSel')) { $('digestSel').value = d.digest || 'off'; $('digestHour').value = String(d.digest_hour ?? 20); digestNote(d.digest_waiting || 0); } }
   $('clipOn').checked = clipEnabled(); loadVersion(); loadIg();
 }
@@ -895,6 +911,8 @@ function initStaticEventBindings() {
   const tabHome = document.querySelector('nav.tabbar [data-tab="home"]');
   const tabWatch = document.querySelector('nav.tabbar [data-tab="watch"]');
   if(tabHome) tabHome.addEventListener('click', () => setTab('home'));
+  const tabLive = document.querySelector('nav.tabbar [data-tab="live"]');
+  if(tabLive) tabLive.addEventListener('click', () => setTab('live'));
   if(tabWatch) tabWatch.addEventListener('click', openWatch);
 
   safeBind('navSettingsBtn', 'click', openSettings);
@@ -1661,7 +1679,7 @@ function initShell() {
   });
   document.querySelectorAll('#rail [data-nav]').forEach(b => b.addEventListener('click', () => {
     const n = b.dataset.nav;
-    if (n === 'home') setTab('home'); else if (n === 'watch') openWatch(); else if (n === 'files') openFiles(); else if (n === 'queue') openQueue();
+    if (n === 'home') setTab('home'); else if (n === 'live') setTab('live'); else if (n === 'watch') openWatch(); else if (n === 'files') openFiles(); else if (n === 'queue') openQueue();
     else if (n === 'settings') openSettings(); else if (n === 'keys') $('kmodal').classList.add('open');
   }));
   safeBind('navFilesBtn', 'click', openFiles);
@@ -1754,9 +1772,9 @@ function qRender(jobs, slots) {
     const btn = (a, ico, lab, dis) => `<button class="qb${a === 'cancel' ? ' del' : ''}" data-qa="${a}" data-id="${esc(j.id)}" title="${lab}" aria-label="${lab}"${dis ? ' disabled' : ''}>${ico}</button>`;
     const move = st === 'queued' ? btn('top', '⤒', 'Start next', i === 0) + btn('up', '↑', 'Move up', i === 0) + btn('down', '↓', 'Move down', i === list.length - 1) : '';
     const pr = st === 'paused' ? btn('resume', '▶', 'Resume') : (st === 'queued' || j.can_pause) ? btn('pause', '⏸', 'Pause') : '';
-    return `<div class="qrow q-${st}"><div class="qpos">${st === 'running' ? `<div class="pring${p < 1 ? ' ind' : ''}" style="--p:${p};--ringbg:var(--modal)"><b>${p}</b></div>` : st === 'queued' ? `<b>#${j.position || i + 1}</b>` : '⏸'}</div>`
-      + `<div class="qmain"><b>${esc(j.label)}</b><small>${esc(j.message || '')}${j.speed ? ' · ' + esc(j.speed) : ''}${j.eta ? ' · ETA ' + esc(j.eta) : ''}</small>${st === 'running' ? `<div class="qbar"><i style="width:${p}%"></i></div>` : ''}</div>`
-      + `<div class="qctl">${move}${pr}${btn('cancel', '✕', 'Cancel')}</div></div>`;
+    return `<div class="qrow q-${st}${j.live ? ' q-live' : ''}"><div class="qpos">${j.live && st === 'running' ? '<b class="recdot">REC</b>' : st === 'running' ? `<div class="pring${p < 1 ? ' ind' : ''}" style="--p:${p};--ringbg:var(--modal)"><b>${p}</b></div>` : st === 'queued' ? `<b>#${j.position || i + 1}</b>` : '⏸'}</div>`
+      + `<div class="qmain"><b>${esc(j.label)}</b><small>${esc(j.message || '')}${j.speed ? ' · ' + esc(j.speed) : ''}${j.eta ? ' · ETA ' + esc(j.eta) : ''}</small>${st === 'running' && !j.live ? `<div class="qbar"><i style="width:${p}%"></i></div>` : ''}</div>`
+      + `<div class="qctl">${move}${pr}${j.live ? btn('cancel', '⏹', 'Stop &amp; save') : btn('cancel', '✕', 'Cancel')}</div></div>`;
   };
   const sec = (t, list) => list.length ? `<div class="qh">${t}<em>${list.length}</em></div>` + list.map(row).join('') : '';
   $('qlist').innerHTML = jobs.length ? sec('⚡ Downloading now', run) + sec('⏳ Waiting in line', wait) + sec('⏸ Paused', held)
@@ -1855,4 +1873,151 @@ async function xClean(what, n) {
     else if (s) { e.stopPropagation(); X.selMode = true; X.sel = new Set(X.rows.filter(r => r._k > 0).map(r => r.path)); xRender(); }
   }, true);
   $('xgrid').addEventListener('keydown', e => { const g = e.target.closest('[data-sgo]'); if (g && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); xGo(g.dataset.sgo); } });
+})();
+
+
+/* ================= TikTok LIVE ================= */
+function liveWint(on) {
+  const w = $('wint'); if (!w) return;
+  if (AppState.wintHtml === undefined) AppState.wintHtml = w.innerHTML;
+  if (on && !w.dataset.live) { w.innerHTML = [2, 5, 10, 15, 30].map(m => `<option value="${m}"${m === 5 ? ' selected' : ''}>every ${m} min</option>`).join(''); w.dataset.live = '1'; }
+  else if (!on && w.dataset.live) { w.innerHTML = AppState.wintHtml; delete w.dataset.live; }
+}
+function liveCard(r) {
+  const L = r.live; setHint(''); AppState.liveOn = !!L.is_live;
+  $('siteBadge').textContent = L.is_live ? '🔴 LIVE' : 'TikTok LIVE';
+  if (r.thumbnail) { $('preview').classList.remove('no-thumb'); $('thumb').className = 'thumb'; $('thumb').style.display = ''; setThumb(r.thumbnail); }
+  else { $('preview').classList.add('no-thumb'); $('thumb').style.display = 'none'; }
+  $('ptitle').textContent = r.title; $('plnote').style.display = 'none';
+  const chips = [L.is_live ? ['🔴 Live now', 'ok'] : '⚫ Not live', '👤 @' + L.user, `📁 tiktok/${L.user}/lives/`];
+  if (L.recording) chips.push(['⏺ Already recording', 'ok']);
+  $('chips').innerHTML = chips.map(chipHtml).join('');
+  $('watchTxt').textContent = `🔴 Record automatically whenever @${L.user} goes live`; $('watchrow').classList.add('show');
+  refreshOpts();
+}
+(function initLive() {
+  safeBind('liveHelper', 'change', async () => { await post('/settings', {live_helper: $('liveHelper').checked}); toast($('liveHelper').checked ? 'Helper on - used only when TikTok blocks the check' : 'Helper off - only TikTok itself is asked'); });
+  safeBind('liveQuality', 'change', async () => { const r = await post('/settings', {live_quality: $('liveQuality').value}); toast(r.success ? 'New recordings: ' + $('liveQuality').selectedOptions[0].text : 'Could not save'); });
+  safeBind('liveMax', 'change', async () => { const r = await post('/settings', {live_max_hours: $('liveMax').value}); toast(r.success ? `Recordings stop after ${r.live_max_hours} h at most` : (r.message || 'Could not save')); });
+})();
+
+
+/* ================= Live page ================= */
+var LV = {timer:null, tick:null, skew:0, html:{}, saved:null, filter:''};   // var: setTab() may run before this line
+const lvUser = v => { v = String(v || '').trim(); const m = v.match(LIVE_RE); if (m) return m[1]; v = v.replace(/^@/, ''); return /^[A-Za-z0-9._-]{2,24}$/.test(v) ? v : ''; };
+const lvLink = u => `https://www.tiktok.com/@${encodeURIComponent(u)}/live`;
+const lvAgo = ts => ts ? ago(ts) : 'not yet';
+const lvIn = ts => { if (!ts) return 'soon'; const m = Math.round((ts - Date.now() / 1000 + LV.skew) / 60); return m <= 0 ? 'any moment' : `in ${m} min`; };
+const lvSet = (id, html) => { if (LV.html[id] !== html) { LV.html[id] = html; $(id).innerHTML = html; } };
+const lvAv = (u, live) => `<span class="lvav${live ? ' on' : ''}" style="--h:${[...u].reduce((a, c) => a + c.charCodeAt(0), 0) % 360}"><span>${esc(u[0].toUpperCase())}</span>${live ? '<i>LIVE</i>' : ''}</span>`;
+
+function lvOpen() { if (!LV) return; lvLoad(); lvSaved(); clearInterval(LV.timer); LV.timer = setInterval(lvLoad, 3000); clearInterval(LV.tick); LV.tick = setInterval(lvTick, 1000); }
+function lvClose() { if (!LV) return; clearInterval(LV.timer); clearInterval(LV.tick); LV.timer = LV.tick = null; }
+async function lvLoad() {
+  const d = await api('/live/overview'); if (!d.success) return;
+  LV.skew = Date.now() / 1000 - d.now; lvBadge(d.recording.length);
+  if (document.body.dataset.tab === 'live') lvRender(d);
+}
+function lvBadge(n) { ['rnLive', 'tbLive'].forEach(id => { if ($(id)) $(id).textContent = n || ''; }); }
+setInterval(() => { if (!document.hidden && document.body.dataset.tab !== 'live') lvLoad(); }, 15000); setTimeout(lvLoad, 1500);
+
+function lvRender(d) {
+  const recU = new Set(d.recording.map(r => r.user.toLowerCase()));
+  const liveN = new Set([...recU, ...d.accounts.filter(a => /^🔴/.test(a.last_status)).map(a => a.user.toLowerCase())]).size;
+  lvSet('lvStats', [[d.accounts.length, 'watched'], [liveN, 'live now'], [d.recording.length, 'recording'], LV.saved ? [LV.saved.count, 'saved'] : null]
+    .filter(Boolean).map(([n, l]) => `<span class="lvstat${l === 'recording' && n ? ' hot' : ''}"><b>${n}</b>${l}</span>`).join('')
+    + `<span class="lvstat lvqpill" title="Change in Settings → Downloads">✦ ${({best:'Original quality', hd:'HD quality', sd:'SD quality'})[d.quality] || 'Original quality'}</span>`);
+  $('lvRecCount').textContent = d.recording.length || ''; $('lvAccCount').textContent = d.accounts.length || '';
+  lvSet('lvRec', d.recording.length ? d.recording.map((r, i) => `<div class="lvcard lvrecc" style="--i:${i}">
+      ${r.cover ? `<div class="lvcover" style="background-image:url('${esc(r.cover).replace(/'/g, '%27')}')"></div>` : ''}
+      <div class="lvtop">${lvAv(r.user, true)}<div class="lvwho"><b>@${esc(r.user)}</b><small>${esc(r.title || 'Live on TikTok')}</small></div><span class="lveq" aria-hidden="true"><i></i><i></i><i></i><i></i></span><b class="recdot">● REC</b></div>
+      ${r.quality ? `<div class="lvq">✦ ${esc(r.quality)}</div>` : ''}
+      <div class="lvnums">
+        <div><em>Time</em><b class="lvtime" data-start="${r.started || 0}">${fmtDur(r.secs || 0)}</b></div>
+        <div><em>Size</em><b>${esc(r.size_h)}</b></div>
+        <div><em>Speed</em><b>${esc(r.speed || '–')}</b></div>
+        <div><em>Viewers</em><b>${r.viewers == null ? '–' : new Intl.NumberFormat('en', {notation:'compact'}).format(r.viewers)}</b><small>${r.peak ? 'peak ' + new Intl.NumberFormat('en', {notation:'compact'}).format(r.peak) : ''}</small></div>
+      </div>
+      <div class="lvbtns"><button class="btn ghost lvmark" data-lvmark="${esc(r.id)}" title="Mark this moment - it becomes a chapter in the video">⭐ Mark moment${r.marks ? ` <em>${r.marks}</em>` : ''}</button><a class="btn ghost" href="${lvLink(r.user)}" target="_blank" rel="noopener noreferrer">↗ TikTok</a><button class="btn ghost lvdanger" data-lvstop="${esc(r.id)}">⏹ Stop &amp; save</button></div></div>`).join('')
+    : '<div class="lvempty">Nothing is recording. When a watched account goes live, it shows up here by itself.</div>');
+  const ivs = d.intervals || [2, 5, 10, 15, 30];
+  lvSet('lvAcc', d.accounts.length ? d.accounts.map(a => {
+    const rec = recU.has(a.user.toLowerCase()), warn = /^⚠/.test(a.last_status);
+    const st = rec ? ['rec', '● Recording'] : !a.enabled ? ['off', 'Paused'] : a.busy ? ['chk', 'Checking…'] : warn ? ['warn', '⚠ Check failed'] : /^🔴/.test(a.last_status) ? ['rec', 'Live'] : ['idle', 'Not live'];
+    return `<div class="lvcard lvaccc s-${st[0]}" style="--i:${d.accounts.indexOf(a)}">
+      <div class="lvtop">${lvAv(a.user, st[0] === 'rec')}<div class="lvwho"><b>@${esc(a.user)}</b><small>${a.total} recorded</small></div><span class="lvchip c-${st[0]}">${st[1]}</span></div>
+      <div class="lvmeta">${warn ? esc(a.last_status) + '<br>' : ''}Checked ${lvAgo(a.last_check)}${a.enabled ? ` · next ${lvIn(a.next_check)}` : ''}${a.habit ? `<br><span class="lvhabit">🕘 ${esc(a.habit)}</span>` : a.lives_seen ? `<br><span class="lvhabit">🕘 Learning their schedule (${a.lives_seen}/3 lives)</span>` : ''}</div>
+      <div class="lvctl">
+        <select class="wsel" data-lvint="${esc(a.id)}" aria-label="Check how often">${ivs.map(m => `<option value="${m}"${m === a.interval ? ' selected' : ''}>every ${ivLabel(m)}</option>`).join('')}</select>
+        <button class="mini" data-lvact="check" data-id="${esc(a.id)}">Check now</button>
+        ${rec ? '' : `<button class="mini" data-lvrec="${esc(a.user)}">🔴 Record</button>`}
+        <button class="mini" data-lvact="toggle" data-id="${esc(a.id)}">${a.enabled ? 'Pause' : 'Resume'}</button>
+        <a class="mini" href="${lvLink(a.user)}" target="_blank" rel="noopener noreferrer" aria-label="Open @${esc(a.user)} on TikTok">↗</a>
+        <button class="mini del" data-lvdel="${esc(a.id)}" aria-label="Stop watching @${esc(a.user)}">✕</button>
+      </div></div>`;
+  }).join('') : '<div class="lvempty">No accounts yet. Type a username above and press <b>Watch</b>.</div>');
+  if (!d.ready) setHintLv('⚠ curl_cffi is missing on the server, so TikTok blocks checks more often. Rebuild the Docker image.');
+}
+function setHintLv(t, err) { $('lvHint').textContent = t || ''; $('lvHint').classList.toggle('err', !!err); }
+function lvTick() {
+  document.querySelectorAll('.lvtime[data-start]').forEach(el => { const s = +el.dataset.start; if (s) el.textContent = fmtDur(Math.max(0, Date.now() / 1000 - LV.skew - s)); });
+}
+async function lvSaved() {
+  const r = await api('/fs/lives');
+  if (!r.success) {
+    LV.saved = null; $('lvSavedSum').textContent = '';
+    LV.html.lvSaved = ''; $('lvSaved').innerHTML = r.locked ? '<div class="lvempty lvlock">🔒 Saved lives are behind the file password. <button class="btn ghost" data-lvunlock="1">Unlock</button></div>' : `<div class="lvempty">${esc(r.message || 'Could not load the saved lives.')}</div>`;
+    return;
+  }
+  LV.saved = r; $('lvSavedSum').textContent = r.count ? `${r.count} · ${r.total_h}${r.hours ? ' · ' + r.hours + ' h' : ''}` : '';
+  lvSavedRender();
+}
+function lvSavedRender() {
+  const r = LV.saved; if (!r) return;
+  const users = [...new Set(r.items.map(x => x.user))];
+  const items = r.items.filter(x => !LV.filter || x.user === LV.filter);
+  const chips = users.length > 1 ? `<div class="lvfilter"><button data-lvf="" class="${LV.filter ? '' : 'on'}">All</button>${users.map(u => `<button data-lvf="${esc(u)}" class="${LV.filter === u ? 'on' : ''}">@${esc(u)}</button>`).join('')}</div>` : '';
+  LV.html.lvSaved = '';
+  $('lvSaved').innerHTML = r.items.length ? chips + `<div class="lvlist">` + items.map(x => `<div class="lvrow">
+      <span class="lvthumb"><img loading="lazy" alt="" src="${xThumb(x)}" onerror="this.remove()"><span>▶</span></span><div class="lvwho"><b>@${esc(x.user)}</b><small>${esc(new Date(x.modified * 1000).toLocaleString(undefined, {dateStyle:'medium', timeStyle:'short'}))}</small></div>
+      <span class="lvdur">${x.duration ? fmtDur(x.duration) : '–'}</span><span class="lvsize">${esc(x.size_h)}</span>
+      <div class="lvctl"><a class="mini" href="${xFileUrl(x)}" target="_blank" rel="noopener">▶ Play</a><a class="mini" href="${xFileUrl(x)}?dl=1" download>⬇</a><button class="mini" data-lvfolder="${esc(x.path.split('/').slice(0, -1).join('/'))}" aria-label="Show in Files">📂</button></div></div>`).join('') + '</div>'
+    : '<div class="lvempty">No saved lives yet.</div>';
+}
+async function lvAddWatch() {
+  const u = lvUser($('lvUser').value); if (!u) return setHintLv('Type a TikTok username, like @name, or paste a tiktok.com/@name/live link.', true);
+  const r = await post('/watches', {kind:'tiktok_live', target:u, interval:+$('lvInt').value});
+  setHintLv(r.success ? `Watching @${u} ✓ - it records by itself when they go live.` : (r.message || 'Could not add'), !r.success);
+  if (r.success) { $('lvUser').value = ''; await api(`/watches/${encodeURIComponent(r.watch.id)}/check`, {method:'POST'}); }
+  lvLoad(); loadWatches();
+}
+async function lvRecord(u) {
+  u = u || lvUser($('lvUser').value); if (!u) return setHintLv('Type a TikTok username first.', true);
+  setHintLv(`Checking if @${u} is live…`);
+  const r = await post('/download-action', {action_type:'url', target:lvLink(u)});
+  if (!r.success) return setHintLv(r.message || 'Could not start.', true);
+  setTracked([...tracked(), r.job_id]); watch();
+  setTimeout(async () => {
+    const j = (await api('/jobs?ids=' + r.job_id)).jobs || [];
+    const job = j[0]; if (job && job.status === 'error') setHintLv(job.message, true); else setHintLv(`🔴 Recording @${u} ✓`);
+    lvLoad();
+  }, 3500);
+}
+
+(function initLivePage() {
+  const pg = $('livePage'); if (!pg) return;
+  safeBind('lvWatchBtn', 'click', lvAddWatch); safeBind('lvRecBtn', 'click', () => lvRecord());
+  $('lvUser').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); lvAddWatch(); } });
+  pg.addEventListener('change', e => { const s = e.target.closest('[data-lvint]'); if (s) { setWInt(s.dataset.lvint, s.value).then(lvLoad); } });
+  pg.addEventListener('click', async e => {
+    const t = e.target.closest('[data-lvmark],[data-lvstop],[data-lvact],[data-lvdel],[data-lvrec],[data-lvunlock],[data-lvfolder],[data-lvf]'); if (!t) return;
+    if (t.dataset.lvmark) { const r = await post(`/live/${encodeURIComponent(t.dataset.lvmark)}/mark`, {}); if (r.success) { toast(`⭐ Moment marked at ${fmtDur(r.t)}`); t.classList.remove('pop'); void t.offsetWidth; t.classList.add('pop'); } else toast(r.message || 'Could not mark'); lvLoad(); return; }
+    if (t.dataset.lvstop) { t.disabled = true; t.textContent = 'Saving…'; await api('/cancel/' + encodeURIComponent(t.dataset.lvstop), {method:'POST'}); toast('Stopping - the recording is being saved'); setTimeout(() => { lvLoad(); lvSaved(); }, 4000); }
+    else if (t.dataset.lvact) { await wact(t.dataset.id, t.dataset.lvact); if (t.dataset.lvact === 'check') toast('Checking now…'); lvLoad(); setTimeout(lvLoad, 4000); }
+    else if (t.dataset.lvdel) { await wdel(t.dataset.lvdel); lvLoad(); }
+    else if (t.dataset.lvrec) lvRecord(t.dataset.lvrec);
+    else if (t.dataset.lvunlock) { if (await xUnlock()) lvSaved(); }
+    else if (t.dataset.lvfolder) { await openFiles(); xGo(t.dataset.lvfolder); }
+    else if (t.dataset.lvf !== undefined) { LV.filter = t.dataset.lvf; lvSavedRender(); }
+  });
 })();

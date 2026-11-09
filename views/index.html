@@ -27,6 +27,7 @@
 <div class="shell">
 <aside class="rail" id="rail" aria-label="Main">
   <button data-nav="home" class="on"><span>🏠</span><b>Download</b></button>
+  <button data-nav="live"><span>🔴</span><b>Live</b><em id="rnLive"></em></button>
   <button data-nav="queue"><span>☰</span><b>Queue</b></button>
   <button data-nav="watch"><span>👁</span><b>Watchlist</b><em id="rnWatch"></em></button>
   <button data-nav="files"><span>📁</span><b>Files</b></button>
@@ -187,6 +188,31 @@
     </div>
   </section>
 
+  <!-- TikTok LIVE page -->
+  <section class="livepage view-live" id="livePage" aria-label="TikTok LIVE">
+    <header class="lvhead">
+      <div><h2>🔴 TikTok LIVE</h2><p class="hint" style="margin:2px 0 0">Record lives now, or watch accounts and record every time they go live.</p></div>
+      <div class="lvstats" id="lvStats"></div>
+    </header>
+
+    <div class="lvadd">
+      <input id="lvUser" placeholder="TikTok username or tiktok.com/@user/live link" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="TikTok username">
+      <select id="lvInt" class="wsel" aria-label="Check how often"><option value="2">every 2 min</option><option value="5" selected>every 5 min</option><option value="10">every 10 min</option><option value="15">every 15 min</option><option value="30">every 30 min</option></select>
+      <button class="btn ghost" id="lvWatchBtn">👁 Watch</button>
+      <button class="btn primary" id="lvRecBtn">🔴 Record now</button>
+    </div>
+    <p class="hint" id="lvHint"></p>
+
+    <h3 class="sec lvsec">⏺ Recording now <em id="lvRecCount"></em></h3>
+    <div id="lvRec" class="lvrec"></div>
+
+    <h3 class="sec lvsec">👁 Watched accounts <em id="lvAccCount"></em></h3>
+    <div id="lvAcc" class="lvacc"></div>
+
+    <h3 class="sec lvsec">🎞 Saved lives <em id="lvSavedSum"></em></h3>
+    <div id="lvSaved"></div>
+  </section>
+
 
 </main>
 </div>
@@ -251,6 +277,15 @@
         <div class="fld" style="margin-top:14px;max-width:380px"><label>When I leave “Name it” empty (videos)</label><select id="autoName"><option value="date">Date + number  (2026-10-31_001)</option><option value="keep">Keep the original title</option></select></div>
         <label class="tg" style="display:block;margin-top:16px"><input type="checkbox" id="preferH264"><span>📱 Make videos iPhone-friendly (H.264)</span></label>
         <p class="hint" style="margin-top:4px">iPhone Photos only accepts H.264 / HEVC videos. Without this, YouTube can give VP9/AV1 files that Photos refuses. (YouTube is then limited to 1080p.)</p>
+        <div class="sublab" style="margin-top:18px">🔴 TikTok LIVE</div>
+        <p class="hint" style="margin:0 0 8px">Paste a <b>tiktok.com/@user/live</b> link to record it now, or press <b>Watch</b> to record every time they go live. Recordings go to <i>tiktok/&lt;user&gt;/lives/</i>.</p>
+        <label class="tg" style="display:block"><input type="checkbox" id="liveHelper"><span>Use the tikrec.com helper when TikTok blocks the check</span></label>
+        <p class="hint" style="margin-top:4px">Only used when TikTok refuses the direct check. That service then sees which username is being checked.</p>
+        <div class="grid2" style="margin-top:10px;max-width:560px">
+          <div class="fld"><label>Recording quality</label><select id="liveQuality"><option value="best">Original - best quality (biggest files)</option><option value="hd">HD - smaller files</option><option value="sd">SD - smallest files</option></select></div>
+        </div>
+        <div class="fld" style="margin-top:10px;max-width:280px"><label>Stop a recording after</label><select id="liveMax"><option value="1">1 hour</option><option value="2">2 hours</option><option value="3">3 hours</option><option value="4">4 hours</option><option value="6">6 hours</option><option value="8">8 hours</option><option value="12">12 hours</option><option value="24">24 hours</option></select></div>
+        <p class="hint" id="liveReady"></p>
       </section>
       <section class="sxpane" data-pane="speed">
         <h4>⚡ Speed &amp; names</h4>
@@ -336,6 +371,7 @@
 <nav class="tabbar" id="tabbar" aria-label="Main">
   <i class="tabind"></i>
   <button data-tab="home" class="on"><span>🏠</span>Home<em id="tbRun"></em></button>
+  <button data-tab="live"><span>🔴</span>Live<em id="tbLive"></em></button>
   <button data-tab="watch"><span>👁</span>Watchlist<em id="tbWatch"></em></button>
   <button id="navFilesBtn"><span>📁</span>Files</button>
   <button id="navSettingsBtn"><span>⚙️</span>Settings<i class="wdot" data-sdot></i></button>
