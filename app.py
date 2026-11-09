@@ -3220,10 +3220,61 @@ def require_token():
     if _token_ok(request.cookies.get("hub_token")) or _token_ok(request.headers.get("X-Hub-Token")):
         return None
     if _token_ok(request.args.get("token")):
-        resp = redirect(request.path)
-        resp.set_cookie("hub_token", HUB_TOKEN, httponly=True, samesite="Lax", max_age=60 * 60 * 24 * 365)
-        return resp
+        return _remember_token(redirect(request.path))
+    if request.path == "/unlock" and request.method == "POST":           # the token box on the lock page
+        ip, now = request.remote_addr or "?", time.time()
+        st = _tok_fail.get(ip, [0, 0.0])
+        if st[1] > now:
+            return _lock_page(f"Too many wrong tries. Wait {int(st[1] - now) + 1} seconds."), 429
+        if _token_ok((request.form.get("token") or "").strip()):
+            _tok_fail.pop(ip, None)
+            return _remember_token(redirect("/"))
+        st[0] += 1
+        if st[0] >= 5:
+            st = [0, now + 60]
+        _tok_fail[ip] = st
+        time.sleep(1)                                                   # makes guessing slow
+        return _lock_page("That token is not right. Copy it again from HUB_TOKEN in your .env file."), 401
+    if request.method == "GET" and "text/html" in (request.headers.get("Accept") or ""):
+        return _lock_page(), 401                                        # a browser / the home-screen app: show the token box
     return jsonify(success=False, message="Locked. Open the site once with ?token=YOUR_TOKEN."), 401
+
+
+_tok_fail = {}
+
+
+def _remember_token(resp):
+    resp.set_cookie("hub_token", HUB_TOKEN, httponly=True, samesite="Lax", max_age=60 * 60 * 24 * 365)
+    return resp
+
+
+def _lock_page(error=""):
+    """A small page with one box for the access token (works inside the phone home-screen app too)."""
+    err = f'<p class="err" role="alert">{html.escape(error)}</p>' if error else ""
+    return app.response_class(f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="robots" content="noindex">
+<title>Media Hub - locked</title><link rel="apple-touch-icon" href="/icon/180.png"><link rel="manifest" href="/manifest.webmanifest">
+<style>
+:root{{--bg:#090b14;--card:#141729;--text:#eef0fb;--mute:#a0a6c6;--line:rgba(255,255,255,.1);--field:#0b0e1c}}
+@media (prefers-color-scheme:light){{:root{{--bg:#f1f4ff;--card:#fff;--text:#14172e;--mute:#535d84;--line:rgba(30,36,90,.14);--field:#fff}}}}
+*{{box-sizing:border-box}} body{{margin:0;min-height:100vh;display:grid;place-items:center;padding:16px;background:var(--bg);color:var(--text);
+font-family:'Segoe UI',system-ui,-apple-system,Roboto,sans-serif}}
+.card{{width:100%;max-width:380px;padding:28px 24px;border:1px solid var(--line);border-radius:24px;background:var(--card);text-align:center;box-shadow:0 30px 80px rgba(0,0,0,.35)}}
+img{{width:64px;height:64px;border-radius:16px}} h1{{margin:14px 0 4px;font-size:1.3rem}} p{{margin:0 0 16px;color:var(--mute);font-size:.9rem;line-height:1.45}}
+input{{width:100%;padding:13px 14px;border:1px solid var(--line);border-radius:14px;background:var(--field);color:var(--text);font:inherit;font-size:16px}}
+input:focus{{outline:none;border-color:#7c5cf0;box-shadow:0 0 0 3px rgba(124,92,240,.25)}}
+button{{width:100%;margin-top:12px;padding:13px;border:0;border-radius:14px;background:linear-gradient(135deg,#7c3aed,#2f6fe8);color:#fff;font:inherit;font-weight:700;font-size:1rem;cursor:pointer}}
+.err{{margin:0 0 12px;padding:9px 12px;border-radius:12px;background:rgba(251,113,133,.14);color:#fb7185;font-size:.86rem}}
+small{{display:block;margin-top:14px;color:var(--mute);font-size:.76rem}}
+</style></head><body><main class="card">
+<img src="/icon/180.png" alt=""><h1>🔒 Media Hub is locked</h1>
+<p>Enter your access token (<b>HUB_TOKEN</b> from the server's <b>.env</b> file). This device remembers it for a year.</p>
+{err}<form method="post" action="/unlock" autocomplete="on">
+<input type="text" name="username" value="media-hub" autocomplete="username" hidden>
+<input type="password" name="token" placeholder="Access token" autocomplete="current-password" autocapitalize="off" spellcheck="false" required autofocus>
+<button type="submit">Unlock</button></form>
+<small>Each phone, computer and home-screen app asks once.</small>
+</main></body></html>""", mimetype="text/html")
 
 
 @app.after_request
