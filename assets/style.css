@@ -1067,3 +1067,7 @@ html[data-scheme="light"] .lvfeed .cc b { color:hsl(var(--h) 65% 38%); }
 .folderrow select option { background:var(--modal); color:var(--text); }
 .folderrow.on { border-color:color-mix(in srgb,var(--pc-ink) 55%,var(--line)); background:color-mix(in srgb,var(--pc) 8%,var(--field)); }
 @media (max-width:560px) { .folderrow select { font-size:16px; } }
+
+/* Shortcut ③: folder box */
+.scfld { max-width:280px; margin:8px 0 2px; }
+#scUrl { word-break:break-all; }
