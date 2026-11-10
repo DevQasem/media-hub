@@ -62,7 +62,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 # --------------------------------------------------------------------------- #
 BASE_DIR = Path(os.path.expanduser("~/media-downloader/downloads")).resolve()
 DATA_DIR = BASE_DIR.parent                       # jobs.json, watches.json, settings.json, archive.txt, cookies.txt
-CATEGORIES = ("youtube", "tiktok", "snapchat", "instagram", "general")
+CATEGORIES = ("youtube", "tiktok", "snapchat", "instagram", "general", "folders")   # folders = your own (e.g. "Good")
 for _c in CATEGORIES:
     (BASE_DIR / _c).mkdir(parents=True, exist_ok=True)
 
@@ -226,8 +226,53 @@ def prune_jobs():
             cancels.pop(jid, None)
 
 
+def move_to_folder(job, files):
+    """Move a finished job's files into folders/<name>/ (the "Save to" choice). Returns {old rel: new rel}."""
+    name = clean_folder(job.get("folder"))
+    if not name or job.get("category") not in CATEGORIES:
+        return {}
+    src_root, dest = BASE_DIR / job["category"], BASE_DIR / "folders" / name
+    dest.mkdir(parents=True, exist_ok=True)
+    moved, emptied = {}, set()
+    for rel in files:
+        p = src_root / rel
+        if not p.is_file():
+            continue
+        if p.parent.resolve() == dest.resolve():             # already there (downloaded into the same folder again)
+            moved[rel] = f"{name}/{p.name}"
+            continue
+        target, k = dest / p.name, 2
+        while target.exists():
+            target, k = dest / f"{p.stem} ({k}){p.suffix}", k + 1
+        try:
+            shutil.move(str(p), str(target))
+        except OSError:
+            continue
+        _retag(fs_rel(p), fs_rel(target))
+        moved[rel] = f"{name}/{target.name}"
+        emptied.add(p.parent)
+    for d in emptied:                                          # tidy up folders the move left empty
+        while d != src_root and src_root in d.parents:
+            try:
+                if any(d.iterdir()):
+                    break
+                d.rmdir()
+            except OSError:
+                break
+            d = d.parent
+    fs_dirty()
+    return moved
+
+
 def finish_ok(job, files, message=None, fresh=None):
     """fresh = the files this job really created now (defaults to all of them)."""
+    if job.get("folder") and files:                           # "Save to" a folder of your own
+        moved = move_to_folder(job, files)
+        if moved:
+            files = [moved.get(f, f) for f in files if f in moved]
+            fresh = [moved[f] for f in (files if fresh is None else fresh) if f in moved] if fresh is not None else None
+            update(job, category="folders")
+            message = (message or f"Saved {len(files)} file(s)") + f" · 📂 in {clean_folder(job['folder'])}"
     update(job, status="done", progress=100, files=list(files), speed="", eta="",
            fresh=list(files if fresh is None else fresh),
            message=message or f"Saved {len(files)} file(s)", finished=time.time())
@@ -482,6 +527,7 @@ DEFAULT_OPTS = {
     "min_dur": "", "max_dur": "", "min_views": "", "max_mb": "",
     "title_has": "", "title_not": "",
     "name": "",                                                 # file name typed on the page (empty = automatic)
+    "folder": "",                                               # "" = the normal site/creator folder, "Good" = folders/Good/
     "ig_what": "posts",                                         # profile link: posts | stories | highlights | all
     "force": False,                                             # re-download even if the file exists
     # effects (ffmpeg, applied after the download - like the Telegram bots)
@@ -525,6 +571,12 @@ def _secs(v):
     for p in parts:
         t = t * 60 + p
     return t
+
+
+def clean_folder(v):
+    """A folder name typed by the user ("Good") -> one safe folder level (no slashes, max 40 chars)."""
+    s = re.sub(r"\s+", " ", re.sub(r'[\x00-\x1f<>:"/\\|?*]', "", str(v or ""))).strip().strip(".")[:40].strip()
+    return "" if s in ("", ".", "..") else s
 
 
 def clean_filename(v):
@@ -609,6 +661,8 @@ def sanitize_options(raw):
             o[k] = str(v) if re.fullmatch(r"[0-9,\-: ]{0,30}", str(v)) else ""
         elif k == "name":
             o[k] = clean_filename(v)
+        elif k == "folder":
+            o[k] = clean_folder(v)
         elif k in ("title_has", "title_not"):
             o[k] = _WORDS_RE.sub("", str(v)).strip()[:60]
         elif k in ("date_after", "date_before"):
@@ -2189,7 +2243,7 @@ def enqueue(action, target, quality="best", batch=None, options=None, only=None)
     job = {"id": uuid.uuid4().hex[:12], "category": category, "label": label,
            "status": "queued", "progress": 0, "message": "Waiting in queue…",
            "speed": "", "eta": "", "files": [], "fresh": [], "created": time.time(),
-           "finished": None, "batch": batch}
+           "finished": None, "batch": batch, "folder": sanitize_options(options)["folder"]}
     with lock:
         jobs[job["id"]], cancels[job["id"]] = job, cancel
     queue_add(job, fn, args)
@@ -3088,6 +3142,17 @@ def tiktok_cookies():
     return jsonify(success=True, **tt_login_status(check=request.args.get("check") == "1"))
 
 
+@app.route("/folders")
+def folders_list():
+    """Your own folders (names only) for the "Save to" picker."""
+    root = BASE_DIR / "folders"
+    try:
+        names = sorted((d.name for d in root.iterdir() if d.is_dir() and not d.name.startswith(".")), key=str.lower)
+    except OSError:
+        names = []
+    return jsonify(success=True, folders=names[:200])
+
+
 @app.route("/live/status")
 def live_status_api():
     user = (request.args.get("user") or "").lstrip("@")
@@ -3525,7 +3590,8 @@ def run_watch(wid):
     try:
         job = {"id": uuid.uuid4().hex[:12], "category": w["category"], "label": f"👁 {w['label']}",
                "status": "running", "progress": 0, "message": "Checking…", "speed": "", "eta": "",
-               "files": [], "fresh": [], "created": time.time(), "finished": None, "silent": True, "batch": None}
+               "files": [], "fresh": [], "created": time.time(), "finished": None, "silent": True, "batch": None,
+               "folder": clean_folder((w.get("options") or {}).get("folder"))}
         with lock:
             jobs[job["id"]], cancels[job["id"]] = job, cancel
         try:
@@ -3980,7 +4046,10 @@ def auto_tags(rel, is_dir=False):
     t = set()
     if parts[0] in CATEGORIES:
         t.add(parts[0])
-    if len(parts) >= 3 or (is_dir and len(parts) >= 2):
+    if parts[0] == "folders":
+        if len(parts) >= 3 or (is_dir and len(parts) >= 2):
+            t.add(_tagname(parts[1]))
+    elif len(parts) >= 3 or (is_dir and len(parts) >= 2):
         u = _tagname(parts[1]).lstrip("@")
         if u:
             t.add("@" + u)

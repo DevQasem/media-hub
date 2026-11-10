@@ -1060,3 +1060,10 @@ html[data-scheme="light"] .lvfeed .cc b { color:hsl(var(--h) 65% 38%); }
 .lvloginst.warn { background:color-mix(in srgb,var(--amber) 14%,transparent); color:var(--amber); }
 .lvloginst.mid { background:color-mix(in srgb,var(--tt-c) 10%,transparent); }
 .lvlogin details.steps { margin:0; }
+
+
+/* ================= Save to folder ================= */
+.folderrow select { flex:1; min-width:0; padding:12px 4px; border:0; outline:0; background:none; color:var(--text); font:inherit; font-size:.92rem; cursor:pointer; color-scheme:var(--cs); }
+.folderrow select option { background:var(--modal); color:var(--text); }
+.folderrow.on { border-color:color-mix(in srgb,var(--pc-ink) 55%,var(--line)); background:color-mix(in srgb,var(--pc) 8%,var(--field)); }
+@media (max-width:560px) { .folderrow select { font-size:16px; } }

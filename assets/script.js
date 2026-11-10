@@ -382,6 +382,7 @@ function getOpts() {
     const v = el.type === 'checkbox' ? el.checked : el.value.trim();
     o[el.dataset.o] = el.type === 'checkbox' ? (seen[el.dataset.o] || v) : v; if (el.type === 'checkbox') seen[el.dataset.o] = o[el.dataset.o];
   });
+  o.folder = saveFolder();
   return o;
 }
 function setOpts(p) {
@@ -427,6 +428,7 @@ function updateGo(o, lk) {
   if (o.fx_look !== 'none' && lk) sub += ' · ✨ ' + lk[1];
   if (AppState.noPreview && AppState.mode === 'video') sub = 'No preview - will try anyway · ' + sub;
 
+  if (saveFolder()) sub += ' · 📂 ' + saveFolder();
   $('goLabel').textContent = label;
   $('goSub').textContent = sub;
 
@@ -2095,4 +2097,42 @@ async function ttLoginSave() {
   safeBind('ttCheck', 'click', async () => { $('ttLoginStatus').textContent = 'Checking with TikTok…'; await ttLoginLoad(true); });
   safeBind('ttRemove', 'click', async () => { if (!confirm('Remove the TikTok login from Media Hub?')) return; const r = await api('/tiktok-cookies', {method:'DELETE'}); toast(r.message || 'Removed'); ttLoginPaint(r); lvLoad(); });
   $('lvOptBtn').addEventListener('click', () => { if (!$('lvOpts').hidden) ttLoginLoad(true); });
+})();
+
+
+/* ================= Save to: default folder or one of your own ================= */
+const FOLDER_KEY = 'hub_folder';
+function saveFolder() { const s = $('fdest'); return s && s.value !== '+new' ? s.value : ''; }
+const cleanFolder = v => String(v || '').replace(/[\x00-\x1f<>:"/\\|?*]/g, '').replace(/\s+/g, ' ').trim().replace(/^\.+|\.+$/g, '').slice(0, 40).trim();
+function folderOptions(names, pick) {
+  const s = $('fdest'); if (!s) return;
+  const all = [...new Set(names.filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  s.innerHTML = '<option value="">Save to: default folder (site / creator)</option>'
+    + all.map(n => `<option value="${esc(n)}">Save to: ${esc(n)}</option>`).join('')
+    + '<option value="+new">＋ New folder…</option>';
+  s.value = all.includes(pick) ? pick : '';
+  s.closest('.folderrow').classList.toggle('on', !!s.value);
+}
+async function loadFolders() {
+  let pick = ''; try { pick = localStorage.getItem(FOLDER_KEY) || ''; } catch {}
+  const r = await api('/folders');
+  folderOptions([...(r.success ? r.folders : []), pick], pick);
+}
+(function initFolders() {
+  const s = $('fdest'); if (!s) return;
+  let prev = '';
+  s.addEventListener('focus', () => { prev = s.value; });
+  s.addEventListener('change', () => {
+    let v = s.value;
+    if (v === '+new') {
+      v = cleanFolder(prompt('Name of the new folder (for example: Good)') || '');
+      if (!v) { s.value = prev; return; }
+      folderOptions([...[...s.options].map(o => o.value).filter(x => x && x !== '+new'), v], v);
+      toast(`📂 New downloads go to “${v}”`);
+    } else toast(v ? `📂 New downloads go to “${v}”` : 'New downloads go to the normal site / creator folder');
+    try { localStorage.setItem(FOLDER_KEY, v); } catch {}
+    s.closest('.folderrow').classList.toggle('on', !!v); prev = v;
+    refreshOpts();
+  });
+  loadFolders();
 })();
