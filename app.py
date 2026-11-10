@@ -4732,15 +4732,18 @@ def _zip_pairs(pairs, first_no=1):
     return send_file(tmp, mimetype="application/zip", as_attachment=True, download_name="photos.zip")
 
 
-@app.route("/phone/grab", methods=["POST"])
+@app.route("/phone/grab", methods=["GET", "POST"])
 def phone_grab():
     """Share-sheet Shortcut: start a download from a link and wait (up to 50 s) so it can go straight into Photos."""
     if not _phone_ok():
-        return jsonify(success=False, message="Wrong key."), 403
+        return jsonify(success=False, message="Wrong key - copy the link again from Media Hub → Settings → Phone."), 403
     raw = request.get_data(as_text=True) or ""
-    m = re.search(r"https?://[^\s\"']+", str(json_body().get("url") or "") or raw)
+    m = re.search(r"https?://[^\s\"']+", str(json_body().get("url") or "") or raw or str(request.args.get("url") or ""))
+    if not m and request.method == "GET":                 # the Shortcut was left on GET, so the link never arrived
+        return jsonify(success=False, message="Almost there! In the Shortcut open “Get Contents of URL”, set Method to POST, "
+                                              "Request Body to JSON, and add a Text field “url” = Shortcut Input."), 405
     if not m:
-        return jsonify(success=False, message="No link found."), 400
+        return jsonify(success=False, message="No link found - share a link (or set the Text field “url” to Shortcut Input)."), 400
     body = json_body()
     folder = clean_folder(body.get("folder") or request.args.get("folder"))      # e.g. ?folder=Good -> folders/Good/
     job, err = enqueue("url", m.group(0), options={"kind": "video", "folder": folder})
