@@ -616,16 +616,18 @@ def creator_of(info):
     return ""
 
 
-def rename_files(folder, files, o, auto=False, prefix=""):
+def rename_files(folder, files, o, auto=False, prefix="", also=None):
     """
     Give THIS job's files the name the user typed - or, with auto=True and nothing typed, [creator_]today's date + a number.
     Several files get _001, _002 ...; a name that is already used gets the next free number, so nothing is overwritten.
     Covers/subtitles/effect copies keep matching their video. Returns {old relative path: new relative path}.
+    also = another folder the files will be moved into (your "Save to" folder): names used there count as taken too.
     """
     name = o.get("name") or ""
     if not files or not (name or auto):
         return {}
     today, mapping, by_dir = time.strftime("%Y-%m-%d"), {}, {}
+    used = lambda d, cand: _taken(d, cand) or (also is not None and _taken(also, cand))
     for rel in files:
         pr = Path(rel)
         by_dir.setdefault(pr.parent.as_posix(), []).append(pr.name)
@@ -645,7 +647,7 @@ def rename_files(folder, files, o, auto=False, prefix=""):
             for b in bases:
                 if name and len(bases) == 1:
                     cand, k = name, 1
-                    while _taken(d, cand):
+                    while used(d, cand):
                         k += 1
                         cand = f"{name}_{k:03d}"
                 else:
@@ -653,7 +655,7 @@ def rename_files(folder, files, o, auto=False, prefix=""):
                     while True:
                         counter += 1
                         cand = f"{stem}_{counter:03d}"
-                        if not _taken(d, cand):
+                        if not used(d, cand):
                             break
                 for n in group[b]:
                     new_n = cand + n[len(b):]
@@ -1234,7 +1236,8 @@ def ytdlp_worker(job, url, category, options, cancel):
             fresh_now = (set(fresh) & set(files)) | made_now
             mode = settings.get("auto_name", "creator")
             auto = not o["name"] and mode in ("date", "creator") and o["kind"] != "subs"     # nothing typed: [creator_]date + number (subtitles keep ".en")
-            m = rename_files(folder, sorted(set(files) & fresh_now), o, auto, prefix=creator_of(info) if mode == "creator" else "")
+            dest = BASE_DIR / "folders" / clean_folder(job.get("folder")) if clean_folder(job.get("folder")) else None
+            m = rename_files(folder, sorted(set(files) & fresh_now), o, auto, prefix=creator_of(info) if mode == "creator" else "", also=dest)
             if m:
                 files = sorted({m.get(f, f) for f in files}); fresh_now = {m.get(f, f) for f in fresh_now}
                 note = (note + " · " if note else "") + "saved as " + Path(sorted(m.values())[0]).name + (f" (+{len(m) - 1} more)" if len(m) > 1 else "")
