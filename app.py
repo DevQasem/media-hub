@@ -738,10 +738,18 @@ def build_ydl_opts(options, folder, hook, tmpl=None, cookiefile=None, ig=False, 
         pps.append({"key": "FFmpegThumbnailsConvertor", "format": "jpg", "when": "before_dl"})
     else:
         q = o["quality"]
-        opts["format"] = "bv*+ba/b" if q == "best" else f"bv*[height<={q}]+ba/b[height<={q}]/b"
+        # "res" = the SHORTER side, so a vertical 720x1280 TikTok counts as 720p (a height cap missed it and fell back to 1080p)
+        res = "res" if q == "best" else f"res:{q}"
+        opts["format"] = "bv*+ba/b"
         opts["merge_output_format"] = o["container"]
-        if o["compat"] or settings.get("prefer_h264", True):        # H.264 plays everywhere, incl. iPhone Photos (VP9/AV1 do not)
-            opts["format_sort"] = ["vcodec:h264", "res", "acodec:m4a"]
+        if q != "best":
+            opts["format_sort"] = [res]
+        if o["compat"] or settings.get("prefer_h264", True):
+            # iPhone / Photos play H.264 and HEVC, not VP9/AV1. Only those two codecs, sharpest first:
+            # TikTok's 1080p is HEVC while its H.264 copy is 720p, so "H.264 first" gave blurry TikToks.
+            ok = "[vcodec~='^(avc|h264|hevc|h265|hvc1)']"
+            opts["format"] = f"bv*{ok}+ba/b{ok}/bv*+ba/b"
+            opts["format_sort"] = [res, "fps", "vcodec:h264", "acodec:m4a", "tbr"]     # m4a: Opus in MP4 does not play on iPhone
 
     # --- extras ----------------------------------------------------------------
     if o["sponsor"]:
