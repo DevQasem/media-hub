@@ -792,7 +792,7 @@ function tplPreview() { const t = $('nameTpl').value.trim(); $('tplprev').textCo
 async function saveTpl() { const r = await post('/settings', {name_template: $('nameTpl').value.trim()}); $('nameTpl').value = r.name_template || ''; tplPreview(); toast(r.name_template ? 'Name template saved ✓' : 'Back to the normal name'); }
 async function loadSettings() {
   const d = await api('/settings');
-  if (d.success) { $('ntfy').value = d.ntfy || ''; $('creatorFolders').checked = d.creator_folders !== false; $('igOrganize').checked = d.ig_organize !== false; $('autoName').value = d.auto_name || 'date'; $('preferH264').checked = d.prefer_h264 !== false; $('notifyDl').checked = !!d.notify_downloads; $('igcap').value = d.ig_cap || 30;
+  if (d.success) { $('ntfy').value = d.ntfy || ''; $('creatorFolders').checked = d.creator_folders !== false; $('igOrganize').checked = d.ig_organize !== false; $('autoName').value = d.auto_name || 'creator'; $('preferH264').checked = d.prefer_h264 !== false; $('notifyDl').checked = !!d.notify_downloads; $('igcap').value = d.ig_cap || 30;
     $('nameTpl').value = d.name_template || ''; $('speedLimit').value = d.speed_limit || '0'; $('parallelParts').value = String(d.parallel_parts || 1); $('paceSel').value = d.pace || 'off'; $('retryCount').value = String(d.retry_count ?? 3); $('cleanUrls').checked = d.clean_urls !== false; tplPreview();
     if ($('liveQuality')) $('liveQuality').value = d.live_quality || 'best';
     if ($('liveHelper')) { $('liveHelper').checked = d.live_helper !== false; $('liveMax').value = String(d.live_max_hours || 6); $('liveReady').textContent = d.live_ready === false ? '⚠ curl_cffi is not installed on the server - TikTok will block live checks more often. Rebuild the Docker image.' : ''; }
@@ -895,7 +895,7 @@ function initStaticEventBindings() {
   const plm = $('plmodal'); plm.addEventListener('click', e => { if (e.target === plm) closePl(); });
   safeBind('preferH264', 'change', async () => { await post('/settings', {prefer_h264: $('preferH264').checked}); toast($('preferH264').checked ? 'New videos: iPhone-friendly (H.264)' : 'New videos: best quality, any format'); });
   safeBind('phoneSetupBtn', 'click', () => showPhoneSetup(false));
-  safeBind('autoName', 'change', async () => { await post('/settings', {auto_name: $('autoName').value}); toast($('autoName').value === 'date' ? 'Empty name = date + number' : 'Empty name = keep the original title'); });
+  safeBind('autoName', 'change', async () => { await post('/settings', {auto_name: $('autoName').value}); toast(({creator:'Empty name = creator + date (nba_2026-10-31_001)', date:'Empty name = date + number'})[$('autoName').value] || 'Empty name = keep the original title'); });
   safeBind('igOrganize', 'change', async () => { await post('/settings', {ig_organize: $('igOrganize').checked}); toast($('igOrganize').checked ? 'Instagram: username / date / type folders' : 'Instagram: flat folders'); });
   safeBind('igfile', 'change', igPickFile);
   safeBind('igSave', 'click', saveIg);

@@ -596,9 +596,29 @@ def _taken(d, base):
         return False
 
 
-def rename_files(folder, files, o, auto=False):
+def creator_of(info):
+    """A short, file-safe creator name from yt-dlp's info: TikTok/Instagram username, YouTube @handle, else the channel."""
+    if not isinstance(info, dict):
+        return ""
+    ek = str(info.get("extractor_key") or info.get("ie_key") or "").lower()
+    if ek.startswith("youtube"):
+        order = ("uploader_id", "channel", "uploader")          # @handle first: short, no spaces
+    elif ek.startswith("instagram"):
+        order = ("channel", "uploader", "uploader_id")
+    else:                                                       # TikTok and most sites: uploader = the username
+        order = ("uploader", "channel", "creator", "uploader_id")
+    for k in order:
+        v = str(info.get(k) or "").strip().lstrip("@")
+        if v and not v.isdigit():
+            v = re.sub(r"[^\w.\-]+", "_", v, flags=re.UNICODE).strip("._")[:40]
+            if v:
+                return v
+    return ""
+
+
+def rename_files(folder, files, o, auto=False, prefix=""):
     """
-    Give THIS job's files the name the user typed - or, with auto=True and nothing typed, today's date + a number.
+    Give THIS job's files the name the user typed - or, with auto=True and nothing typed, [creator_]today's date + a number.
     Several files get _001, _002 ...; a name that is already used gets the next free number, so nothing is overwritten.
     Covers/subtitles/effect copies keep matching their video. Returns {old relative path: new relative path}.
     """
@@ -629,7 +649,7 @@ def rename_files(folder, files, o, auto=False):
                         k += 1
                         cand = f"{name}_{k:03d}"
                 else:
-                    stem = name or today
+                    stem = name or (f"{prefix}_{today}" if prefix else today)
                     while True:
                         counter += 1
                         cand = f"{stem}_{counter:03d}"
@@ -1212,8 +1232,9 @@ def ytdlp_worker(job, url, category, options, cancel):
             files = sorted(set(others) | set(out))
             note = fxnote or note
             fresh_now = (set(fresh) & set(files)) | made_now
-            auto = not o["name"] and settings.get("auto_name", "date") == "date" and o["kind"] != "subs"     # nothing typed: date + number (subtitles keep ".en")
-            m = rename_files(folder, sorted(set(files) & fresh_now), o, auto)
+            mode = settings.get("auto_name", "creator")
+            auto = not o["name"] and mode in ("date", "creator") and o["kind"] != "subs"     # nothing typed: [creator_]date + number (subtitles keep ".en")
+            m = rename_files(folder, sorted(set(files) & fresh_now), o, auto, prefix=creator_of(info) if mode == "creator" else "")
             if m:
                 files = sorted({m.get(f, f) for f in files}); fresh_now = {m.get(f, f) for f in fresh_now}
                 note = (note + " · " if note else "") + "saved as " + Path(sorted(m.values())[0]).name + (f" (+{len(m) - 1} more)" if len(m) > 1 else "")
@@ -3800,7 +3821,7 @@ def settings_api():
             settings["creator_folders"] = bool(d["creator_folders"])
         if "ig_organize" in d:
             settings["ig_organize"] = bool(d["ig_organize"])
-        if d.get("auto_name") in ("date", "keep"):
+        if d.get("auto_name") in ("creator", "date", "keep"):
             settings["auto_name"] = d["auto_name"]
         if "notify_downloads" in d:
             settings["notify_downloads"] = bool(d["notify_downloads"])
@@ -3870,7 +3891,7 @@ def settings_api():
                 return jsonify(success=False, message="The profile limit must be a number (1-500)."), 400
         _save(SETTINGS_FILE, settings)
     return jsonify(success=True, ntfy=settings.get("ntfy", ""),
-                   creator_folders=settings.get("creator_folders", True), ig_organize=settings.get("ig_organize", True), auto_name=settings.get("auto_name", "date"), prefer_h264=settings.get("prefer_h264", True),
+                   creator_folders=settings.get("creator_folders", True), ig_organize=settings.get("ig_organize", True), auto_name=settings.get("auto_name", "creator"), prefer_h264=settings.get("prefer_h264", True),
                    notify_downloads=settings.get("notify_downloads", False),
                    name_template=settings.get("name_template", ""), speed_limit=settings.get("speed_limit", "0"),
                    parallel_parts=settings.get("parallel_parts", 1), pace=settings.get("pace", "off"),

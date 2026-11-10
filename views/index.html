@@ -83,7 +83,7 @@
         <span class="btxt"><b id="goLabel">Download</b><small id="goSub">Best quality</small></span>
         <span class="barrow">⬇</span>
       </button>
-      <div class="namerow"><span>📝</span><input id="fname" data-o="name" maxlength="100" placeholder="Name it (optional) - empty = today’s date + number" autocomplete="off" spellcheck="false"></div>
+      <div class="namerow"><span>📝</span><input id="fname" data-o="name" maxlength="100" placeholder="Name it (optional) - empty = creator + date, e.g. nba_2026-11-10_001" autocomplete="off" spellcheck="false"></div>
       <div class="namerow folderrow"><span>📂</span><select id="fdest" aria-label="Save to folder"><option value="">Save to: default folder (site / creator)</option><option value="+new">＋ New folder…</option></select></div>
       <button class="custbtn" id="custBtn"><span class="sp">✨</span> Customize <i class="cdot"></i><span id="optsum"></span><span class="chev">▼</span></button>
       <div class="watchrow" id="watchrow"><span id="watchTxt">👁 Auto-download new posts</span>
@@ -323,7 +323,7 @@
         <h4>📥 Downloads</h4>
         <label class="tg"><input type="checkbox" id="creatorFolders"><span>Save into creator folders (youtube/CreatorName/…)</span></label>
         <label class="tg" style="display:block;margin-top:8px"><input type="checkbox" id="igOrganize"><span>Organise Instagram as username / date / type (posts, reels, stories, highlights)</span></label>
-        <div class="fld" style="margin-top:14px;max-width:380px"><label>When I leave “Name it” empty (videos)</label><select id="autoName"><option value="date">Date + number  (2026-10-31_001)</option><option value="keep">Keep the original title</option></select></div>
+        <div class="fld" style="margin-top:14px;max-width:380px"><label>When I leave “Name it” empty (videos)</label><select id="autoName"><option value="creator">Creator + date  (nba_2026-10-31_001)</option><option value="date">Date + number  (2026-10-31_001)</option><option value="keep">Keep the original title</option></select></div>
         <label class="tg" style="display:block;margin-top:16px"><input type="checkbox" id="preferH264"><span>📱 Make videos iPhone-friendly (H.264)</span></label>
         <p class="hint" style="margin-top:4px">iPhone Photos only accepts H.264 / HEVC videos. Without this, YouTube can give VP9/AV1 files that Photos refuses. (YouTube is then limited to 1080p.)</p>
         <div class="sublab" style="margin-top:18px">🔴 TikTok LIVE</div>
