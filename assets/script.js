@@ -1674,14 +1674,14 @@ async function showPhoneSetup(fresh) {
     <li>Add <b>Extract Archive</b>, then <b>Save to Photo Album</b> (input <b>Extracted Files</b>).</li>
     <li>Now in any app: <b>Share → Media Hub Share</b>. The video lands in Photos (it waits up to about 50 seconds; longer ones finish inside Media Hub - turn on alerts in Settings → Notifications).</li></ol>
     <div class="sxh">③ Shortcut “Save to <span class="scf">${esc(sf)}</span>” <small>- downloads on the server only, nothing opens, nothing is saved on the phone</small></div>
-    <div class="fld scfld"><label for="scFolder">Folder on the server</label><input id="scFolder" value="${esc(sf)}" maxlength="40" autocomplete="off" spellcheck="false" placeholder="Good"></div>
-    <ol class="phsteps">
-    <li><b>+</b> → name it <b>Save to <span class="scf">${esc(sf)}</span></b> → ⓘ → <b>Show in Share Sheet</b> → accepted types: <b>URLs</b> and <b>Text</b>.</li>
-    <li>Add <b>Get Contents of URL</b> with this URL: <code id="scUrl">${esc(g3)}</code> <button class="mini" id="scCopy" data-cp="${esc(g3)}">Copy</button><br>Show More: Method <b>POST</b>, Request Body <b>JSON</b>, a <b>Text</b> field <b>url</b> = <b>Shortcut Input</b>.</li>
-    <li>Add <b>Get Dictionary Value</b> → key <b>message</b>, then <b>Show Notification</b> with that value.</li>
-    <li>Share → <b>Save to <span class="scf">${esc(sf)}</span></b> from TikTok, Instagram, YouTube… You see “⬇️ Downloading to 📂 <span class="scf">${esc(sf)}</span>” and it saves into <i>folders/<span class="scf">${esc(sf)}</span>/</i> on the server.</li></ol>
+    <div class="scsetup">
+      <div class="fld scfld"><label for="scFolder">Folder on the server</label><input id="scFolder" value="${esc(sf)}" maxlength="40" autocomplete="off" spellcheck="false" placeholder="Good"></div>
+      <div class="sclink"><span>Your link</span><code id="scUrl">${esc(g3)}</code><button class="mini" id="scCopy" data-cp="${esc(g3)}">📋 Copy</button></div>
+    </div>
+    <div class="scg" id="scg" data-folder="${esc(sf)}"></div>
     <p class="hint">Type any folder name above - the link updates. Make one Shortcut per folder if you like (Good, Funny…).</p>
   <p class="hint">Keep these links private. <button class="linkbtn" style="padding:0" data-newkey="1">Make a new key</button> if one leaks. Away from home? Use your Tailscale address instead of the local one.</p>`;
+  scgInit();
 }
 function initShell() {
   $('phoneSetup').addEventListener('input', e => {                    // ③: the folder box rewrites the Shortcut link
@@ -1689,6 +1689,7 @@ function initShell() {
     const f = cleanFolder(e.target.value) || 'Good', u = $('scUrl').textContent.replace(/&folder=[^&]*/, '&folder=' + encodeURIComponent(f));
     $('scUrl').textContent = u; $('scCopy').dataset.cp = u;
     document.querySelectorAll('#phoneSetup .scf').forEach(el => { el.textContent = f; });
+    if ($('scg')) { $('scg').dataset.folder = f; scgGo(SCG.i); }               // the mock phone follows the new name
   });
   $('phoneSetup').addEventListener('click', async e => {
     const c = e.target.closest('[data-cp]'), n = e.target.closest('[data-newkey]');
@@ -2152,3 +2153,97 @@ async function loadFolders() {
   });
   loadFolders();
 })();
+
+
+/* ================= Shortcut walkthrough: a little Shortcuts editor that builds itself ================= */
+const SCG_STEPS = [
+  {t:'Create a new Shortcut', h:'Open the <b>Shortcuts</b> app on your iPhone and tap <b>+</b> in the top-right corner.', k:'plus', show:0, lib:true},
+  {t:'Give it a name', h:'Tap the name at the top and type <b>Save to <span class="scf">F</span></b>.', k:'name', show:0, type:true},
+  {t:'Put it in the Share menu', h:'Tap <b>ⓘ</b> → turn on <b>Show in Share Sheet</b> → tap <b>Share Sheet Types</b> and keep only <b>URLs</b> and <b>Text</b>.', k:'info', show:1},
+  {t:'Add “Get Contents of URL”', h:'Tap <b>Search for apps and actions</b>, type <b>Get Contents of URL</b> and tap it. Tap the blue <b>URL</b> and paste <b>your link</b> (📋 Copy it above).', k:'url', show:2},
+  {t:'Send the link to Media Hub', h:'Tap <b>›</b> to show more: <b>Method → POST</b>, <b>Request Body → JSON</b>, then <b>Add new field → Text</b>: key <code>url</code>, value <b>Shortcut Input</b> (tap the value and pick it).', k:'more', show:2, more:true},
+  {t:'Read the answer', h:'Add <b>Get Dictionary Value</b>. Make it say: Get <b>Value</b> for <code>message</code> in <b>Contents of URL</b>.', k:'dict', show:3, more:true},
+  {t:'Show a notification', h:'Add <b>Show Notification</b> and put <b>Dictionary Value</b> in it. Then tap <b>Done</b>. That’s the whole Shortcut!', k:'done', show:4, more:true},
+  {t:'Use it 🎉', h:'In TikTok, Instagram, YouTube…: <b>Share → More (···) → Save to <span class="scf">F</span></b>. The first time, tap <b>Always Allow</b>. The video lands in <i>folders/<span class="scf">F</span>/</i> on your server - nothing is saved on the phone.', k:'', show:4, more:true, banner:true},
+];
+const SCG = {i:0, typer:null, tap:null};
+
+function scgInit() {
+  const box = $('scg'); if (!box) return;
+  const f = esc(box.dataset.folder || 'Good'), F = `<span class="scf">${f}</span>`;
+  box.innerHTML = `
+    <div class="scg-stage">
+      <div class="scg-phone" aria-hidden="true">
+        <div class="scg-island"></div>
+        <div class="scg-banner"><i class="scg-appico">⬇</i><div><b>SHORTCUTS · now</b><span>⬇️ Downloading to 📂 ${F}</span></div></div>
+        <div class="scg-lib">
+          <div class="scg-libtop"><span>Shortcuts</span><b data-k="plus">+</b></div>
+          <h4>All Shortcuts</h4>
+          <div class="scg-tiles"><i style="--c:#ff9f0a">Timer</i><i style="--c:#30d158">Home</i><i style="--c:#bf5af2">Music</i></div>
+        </div>
+        <div class="scg-ed">
+          <div class="scg-top"><span class="scg-chev">‹</span><span class="scg-name" data-k="name"><i class="scg-appico">⬇</i><b class="scg-typed">New Shortcut</b></span><span class="scg-tr"><b data-k="info">ⓘ</b><b data-k="done">Done</b></span></div>
+          <div class="scg-body">
+            <div class="scg-act" data-n="1"><i class="scg-ai" style="--c:#8e8e93">↗</i><div>Receive <em class="tk">URLs</em> and <em class="tk">Text</em> input from <em class="tk">Share Sheet</em></div></div>
+            <div class="scg-act" data-n="2"><i class="scg-ai" style="--c:#0a84ff">🌐</i><div>Get contents of <em class="tk" data-k="url">…/phone/grab?…folder=${F}</em><span class="scg-mtog" data-k="more">›</span>
+              <div class="scg-more"><div><span>Method</span><em class="tk">POST</em></div><div><span>Request Body</span><em class="tk">JSON</em></div><div><span>url</span><em class="tk var">⧉ Shortcut Input</em></div></div></div></div>
+            <div class="scg-act" data-n="3" data-k="dict"><i class="scg-ai" style="--c:#ff9f0a">{ }</i><div>Get <em class="tk">Value</em> for <em class="tk">message</em> in <em class="tk var">🌐 Contents of URL</em></div></div>
+            <div class="scg-act" data-n="4"><i class="scg-ai" style="--c:#ff453a">🔔</i><div>Show notification <em class="tk var">{ } Dictionary Value</em></div></div>
+          </div>
+          <div class="scg-search">🔍 Search for apps and actions</div>
+        </div>
+        <i class="scg-tap"></i>
+      </div>
+      <div class="scg-panel">
+        <div class="scg-count"></div>
+        <div class="scg-bar"><i></i></div>
+        <div class="scg-text"><h5></h5><p></p></div>
+        <div class="scg-nav"><button class="btn ghost" data-scg="back">‹ Back</button><button class="btn primary" data-scg="next">Next ›</button></div>
+        <div class="scg-dots">${SCG_STEPS.map((_, n) => `<button data-scg="${n}" aria-label="Step ${n + 1}"></button>`).join('')}</div>
+      </div>
+    </div>`;
+  box.querySelector('.scg-panel').addEventListener('click', e => {
+    const b = e.target.closest('[data-scg]'); if (!b) return;
+    const v = b.dataset.scg;
+    scgGo(v === 'next' ? (SCG.i >= SCG_STEPS.length - 1 ? 0 : SCG.i + 1) : v === 'back' ? Math.max(0, SCG.i - 1) : +v);
+  });
+  let x0 = null; const ph = box.querySelector('.scg-phone');                     // swipe the phone left / right
+  ph.addEventListener('pointerdown', e => { x0 = e.clientX; });
+  ph.addEventListener('pointerup', e => { if (x0 === null) return; const dx = e.clientX - x0; x0 = null; if (Math.abs(dx) > 40) scgGo(Math.min(SCG_STEPS.length - 1, Math.max(0, SCG.i + (dx < 0 ? 1 : -1)))); });
+  scgGo(0);
+}
+
+function scgGo(i) {
+  const box = $('scg'); if (!box) return;
+  const st = SCG_STEPS[i], ph = box.querySelector('.scg-phone'), folder = (document.querySelector('#phoneSetup .scf') || {}).textContent || box.dataset.folder || 'Good';
+  SCG.i = i;
+  ph.classList.toggle('lib', !!st.lib);
+  ph.classList.toggle('more', !!st.more);
+  ph.classList.toggle('banner', !!st.banner);
+  box.querySelectorAll('.scg-act').forEach(a => a.classList.toggle('on', +a.dataset.n <= st.show));
+  box.querySelectorAll('[data-k]').forEach(el => el.classList.toggle('focus', el.dataset.k === st.k));
+  const typed = box.querySelector('.scg-typed'); clearInterval(SCG.typer);
+  const goal = 'Save to ' + folder;
+  if (st.type) {                                                              // type the name letter by letter
+    let n = 0; typed.textContent = ''; typed.classList.add('caret');
+    SCG.typer = setInterval(() => { typed.textContent = goal.slice(0, ++n); if (n >= goal.length) { clearInterval(SCG.typer); typed.classList.remove('caret'); } }, 70);
+  } else { typed.textContent = i === 0 ? 'New Shortcut' : goal; typed.classList.remove('caret'); }
+  const pane = box.querySelector('.scg-text');
+  pane.classList.remove('in'); void pane.offsetWidth; pane.classList.add('in');
+  pane.querySelector('h5').textContent = st.t;
+  pane.querySelector('p').innerHTML = st.h.replace(/<span class="scf">F<\/span>/g, `<span class="scf">${esc(folder)}</span>`);
+  box.querySelector('.scg-count').textContent = `Step ${i + 1} of ${SCG_STEPS.length}`;
+  box.querySelector('.scg-bar i').style.width = ((i + 1) / SCG_STEPS.length * 100) + '%';
+  box.querySelectorAll('.scg-dots button').forEach((d, n) => { d.classList.toggle('on', n === i); d.classList.toggle('past', n < i); });
+  box.querySelector('[data-scg="back"]').disabled = i === 0;
+  box.querySelector('[data-scg="next"]').textContent = i === SCG_STEPS.length - 1 ? '↺ Start over' : 'Next ›';
+  clearTimeout(SCG.tap);                                                      // move the "finger" once blocks have slid in
+  const tap = box.querySelector('.scg-tap'); tap.classList.remove('show');
+  SCG.tap = setTimeout(() => {
+    const el = st.k && box.querySelector(`[data-k="${st.k}"]`);
+    if (!el || !el.offsetParent) return;
+    const a = ph.getBoundingClientRect(), b = el.getBoundingClientRect();
+    tap.style.left = (b.left - a.left + b.width / 2) + 'px'; tap.style.top = (b.top - a.top + b.height / 2) + 'px';
+    tap.classList.remove('show'); void tap.offsetWidth; tap.classList.add('show');
+  }, 420);
+}

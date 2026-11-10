@@ -1071,3 +1071,91 @@ html[data-scheme="light"] .lvfeed .cc b { color:hsl(var(--h) 65% 38%); }
 /* Shortcut ③: folder box */
 .scfld { max-width:280px; margin:8px 0 2px; }
 #scUrl { word-break:break-all; }
+
+
+/* ================= Shortcut walkthrough (looks like the Shortcuts editor) ================= */
+.scsetup { display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin:6px 0 14px; }
+.scsetup .scfld { margin:0; flex:0 1 200px; }
+.sclink { flex:1 1 260px; display:flex; align-items:center; gap:8px; min-width:0; padding:8px 8px 8px 12px; border:1px solid var(--line); border-radius:12px; background:var(--field2); }
+.sclink span { flex-shrink:0; font-size:.72rem; font-weight:700; color:var(--mute); text-transform:uppercase; letter-spacing:.06em; }
+.sclink code { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:.74rem; background:none; padding:0; }
+.sclink .mini { flex-shrink:0; }
+.scg { --ios-bg:#000; --ios-card:#1c1c1e; --ios-text:#f2f2f7; --ios-mute:#8e8e93; --ios-blue:#0a84ff; --ios-line:rgba(255,255,255,.08); margin:4px 0 12px; }
+html[data-scheme="light"] .scg { --ios-bg:#f2f2f7; --ios-card:#ffffff; --ios-text:#1c1c1e; --ios-mute:#6c6c70; --ios-blue:#007aff; --ios-line:rgba(0,0,0,.08); }
+.scg-stage { display:flex; flex-wrap:wrap; gap:18px; align-items:center; justify-content:center; }
+.scg-phone { position:relative; flex:0 0 250px; height:550px; padding:44px 10px 10px; border-radius:38px; background:var(--ios-bg); color:var(--ios-text); overflow:hidden; touch-action:pan-y; user-select:none;
+  box-shadow:0 0 0 7px #2a2a2e, 0 0 0 8px #48484d, 0 24px 60px var(--shadow); font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',system-ui,sans-serif; font-size:12px; }
+.scg-island { position:absolute; top:10px; left:50%; width:84px; height:22px; margin-left:-42px; border-radius:20px; background:#000; z-index:6; }
+html[data-scheme="light"] .scg-island { background:#111; }
+/* two screens: the shortcut list (step 1) and the editor */
+.scg-lib, .scg-ed { position:absolute; inset:44px 10px 10px; display:flex; flex-direction:column; transition:opacity .35s ease, transform .45s var(--ease); }
+.scg-lib { opacity:0; transform:translateX(-30px); pointer-events:none; }
+.scg-phone.lib .scg-lib { opacity:1; transform:none; }
+.scg-phone.lib .scg-ed { opacity:0; transform:translateX(30px); }
+.scg-libtop { display:flex; justify-content:space-between; align-items:center; padding:2px 6px; color:var(--ios-blue); font-weight:600; }
+.scg-libtop b { font-size:1.5rem; line-height:1; font-weight:400; padding:0 4px; border-radius:8px; }
+.scg-lib h4 { margin:8px 6px 10px; font-size:1.35rem; font-weight:800; }
+.scg-tiles { display:grid; grid-template-columns:1fr 1fr; gap:8px; padding:0 4px; }
+.scg-tiles i { height:74px; border-radius:16px; padding:10px; font-style:normal; font-weight:700; color:#fff; background:linear-gradient(160deg,color-mix(in srgb,var(--c) 85%,#fff),var(--c)); }
+.scg-top { display:flex; align-items:center; gap:6px; padding:2px 4px 10px; border-bottom:1px solid var(--ios-line); }
+.scg-chev { color:var(--ios-blue); font-size:1.4rem; line-height:1; }
+.scg-name { flex:1; min-width:0; display:flex; align-items:center; gap:6px; justify-content:center; padding:3px 6px; border-radius:9px; font-weight:700; }
+.scg-typed { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.scg-typed.caret::after { content:""; display:inline-block; width:1.5px; height:1em; margin-left:1px; vertical-align:-2px; background:var(--ios-blue); animation:blink .8s infinite; }
+.scg-appico { flex-shrink:0; width:20px; height:20px; display:grid; place-items:center; border-radius:6px; background:linear-gradient(135deg,#5e5ce6,#0a84ff); color:#fff; font-style:normal; font-size:.7rem; font-weight:900; }
+.scg-tr { display:flex; gap:8px; align-items:center; color:var(--ios-blue); font-weight:600; }
+.scg-tr b { padding:2px 4px; border-radius:7px; font-weight:600; }
+.scg-body { flex:1; display:flex; flex-direction:column; gap:7px; padding:10px 0; overflow:hidden; }
+.scg-act { position:relative; display:flex; gap:8px; align-items:flex-start; padding:9px 10px; border-radius:12px; background:var(--ios-card); line-height:1.7;
+  opacity:0; transform:translateY(16px) scale(.94); max-height:0; padding-top:0; padding-bottom:0; margin-top:-7px;
+  transition:opacity .35s ease, transform .45s cubic-bezier(.2,.9,.3,1.25), max-height .4s ease, padding .3s, margin .3s, box-shadow .3s; }
+.scg-act.on { opacity:1; transform:none; max-height:200px; padding-top:9px; padding-bottom:9px; margin-top:0; }
+.scg-ai { flex-shrink:0; width:22px; height:22px; display:grid; place-items:center; margin-top:1px; border-radius:6px; background:var(--c); color:#fff; font-style:normal; font-size:.66rem; font-weight:800; }
+.scg-act > div { flex:1; min-width:0; }
+.scg .tk { display:inline-block; max-width:100%; padding:0 6px; border-radius:6px; font-style:normal; font-weight:600; line-height:1.55; vertical-align:middle;
+  color:var(--ios-blue); background:color-mix(in srgb,var(--ios-blue) 15%,transparent); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; transition:box-shadow .3s; }
+.scg .tk.var { color:#fff; background:var(--ios-blue); }
+.scg-mtog { float:right; color:var(--ios-mute); font-size:1rem; line-height:1.4; padding:0 5px; border-radius:6px; transition:transform .35s var(--ease); }
+.scg-phone.more .scg-mtog { transform:rotate(90deg); }
+.scg-more { clear:both; display:grid; gap:0; max-height:0; overflow:hidden; opacity:0; transition:max-height .45s ease, opacity .3s, margin .3s; }
+.scg-phone.more .scg-more { max-height:120px; opacity:1; margin-top:6px; }
+.scg-more div { display:flex; justify-content:space-between; align-items:center; gap:6px; padding:5px 0; border-top:1px solid var(--ios-line); }
+.scg-more span { color:var(--ios-mute); }
+.scg-search { padding:9px 12px; border-radius:12px; background:var(--ios-card); color:var(--ios-mute); text-align:center; }
+/* what to tap: a soft blue glow + a "finger" that taps it */
+.scg .focus { box-shadow:0 0 0 2px var(--ios-blue), 0 0 18px color-mix(in srgb,var(--ios-blue) 60%,transparent); animation:scgpulse 1.6s ease-in-out infinite; }
+@keyframes scgpulse { 50% { box-shadow:0 0 0 2px var(--ios-blue), 0 0 4px color-mix(in srgb,var(--ios-blue) 30%,transparent); } }
+.scg-tap { position:absolute; z-index:7; width:30px; height:30px; margin:-15px 0 0 -15px; border-radius:50%; pointer-events:none; opacity:0;
+  background:rgba(255,255,255,.55); box-shadow:0 2px 10px rgba(0,0,0,.4); transition:left .45s var(--ease), top .45s var(--ease), opacity .2s; }
+html[data-scheme="light"] .scg-tap { background:rgba(0,0,0,.28); }
+.scg-tap.show { opacity:1; animation:scgtap 1.8s ease-in-out .1s infinite; }
+.scg-tap::after { content:""; position:absolute; inset:0; border-radius:50%; border:2px solid var(--ios-blue); opacity:0; }
+.scg-tap.show::after { animation:scgripple 1.8s ease-out .35s infinite; }
+@keyframes scgtap { 0%,100% { transform:scale(1); } 20% { transform:scale(.72); } 35% { transform:scale(1); } }
+@keyframes scgripple { 0% { opacity:.9; transform:scale(.6); } 60%,100% { opacity:0; transform:scale(2.2); } }
+/* last step: the notification drops in */
+.scg-banner { position:absolute; z-index:8; top:40px; left:8px; right:8px; display:flex; gap:9px; align-items:center; padding:10px 11px; border-radius:18px;
+  background:color-mix(in srgb,var(--ios-card) 82%,transparent); backdrop-filter:blur(16px); box-shadow:0 10px 30px rgba(0,0,0,.35);
+  transform:translateY(-140%); opacity:0; transition:transform .6s cubic-bezier(.2,.9,.3,1.25), opacity .3s; }
+.scg-phone.banner .scg-banner { transform:none; opacity:1; transition-delay:.35s; }
+.scg-banner .scg-appico { width:30px; height:30px; border-radius:8px; font-size:.95rem; }
+.scg-banner b { display:block; font-size:.62rem; color:var(--ios-mute); letter-spacing:.04em; }
+.scg-banner span { font-weight:600; }
+.scg-phone.banner .scg-ed { filter:blur(2px) brightness(.8); transition:filter .4s; }
+/* the instructions next to the phone */
+.scg-panel { flex:1 1 240px; max-width:360px; display:flex; flex-direction:column; gap:10px; }
+.scg-count { font-size:.72rem; font-weight:800; letter-spacing:.08em; text-transform:uppercase; color:var(--pc-ink); }
+.scg-bar { height:5px; border-radius:5px; background:var(--card2); overflow:hidden; } .scg-bar i { display:block; height:100%; background:var(--grad); transition:width .45s var(--ease); }
+.scg-text h5 { margin:2px 0 6px; font-size:1.08rem; }
+.scg-text p { margin:0; font-size:.88rem; line-height:1.55; color:var(--text); }
+.scg-text code { padding:1px 6px; border-radius:6px; background:var(--card2); font-size:.82rem; }
+.scg-text.in { animation:scgin .4s var(--ease); }
+@keyframes scgin { from { opacity:0; transform:translateX(12px); } }
+.scg-nav { display:flex; gap:8px; } .scg-nav .btn { flex:1; padding:10px 12px; font-size:.88rem; } .scg-nav .btn.ghost { color:var(--text); }
+.scg-dots { display:flex; gap:6px; justify-content:center; }
+.scg-dots button { width:8px; height:8px; padding:0; border:0; border-radius:99px; background:var(--card2); cursor:pointer; transition:width .3s var(--ease), background .3s; }
+.scg-dots button.past { background:color-mix(in srgb,var(--pc) 45%,var(--card2)); }
+.scg-dots button.on { width:22px; background:var(--pc-ink); }
+@media (max-width:560px) { .scg-phone { flex-basis:240px; height:550px; } .scg-panel { max-width:none; } }
+.warnbox .scg b, .warnbox .scsetup b { color:inherit; }
+.warnbox .scg-tr b, .warnbox .scg-libtop b { color:var(--ios-blue); }
