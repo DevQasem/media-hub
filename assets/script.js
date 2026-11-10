@@ -1662,6 +1662,8 @@ async function showPhoneSetup(fresh) {
   fetch('/fs/lock', {method:'POST'}).catch(() => {});                          // and lock again right away
   if (!r.success) return toast('Could not read the key');
   const g = `${r.base}/phone/grab?key=${r.key}`;
+  const sf = (typeof saveFolder === 'function' && saveFolder()) || 'Good';
+  const g3 = `${g}&wait=0&folder=${encodeURIComponent(sf)}`;
   $('phoneSetup').innerHTML = `<div class="sxh">① Save to Photos <small>- no Shortcut, no ZIP</small></div><ol class="phsteps">
     <li>iPhone only allows websites to save into Photos over a secure <b>https</b> address.</li>
     <li>Easiest way (Tailscale): on the server run <code>tailscale serve --bg 5000</code>, then open the <b>https://…ts.net</b> address it prints on your iPhone (Safari → Share → Add to Home Screen).</li>
@@ -1671,7 +1673,13 @@ async function showPhoneSetup(fresh) {
     <li>Add <b>Get Contents of URL</b> with this URL: <code>${esc(g)}</code> <button class="mini" data-cp="${esc(g)}">Copy</button><br>Tap <b>Show More</b>: Method <b>POST</b>, Request Body <b>JSON</b>, add a <b>Text</b> field named <b>url</b> with the value <b>Shortcut Input</b>.</li>
     <li>Add <b>Extract Archive</b>, then <b>Save to Photo Album</b> (input <b>Extracted Files</b>).</li>
     <li>Now in any app: <b>Share → Media Hub Share</b>. The video lands in Photos (it waits up to about 50 seconds; longer ones finish inside Media Hub - turn on alerts in Settings → Notifications).</li></ol>
-  <p class="hint">Keep the link in ② private. <button class="linkbtn" style="padding:0" data-newkey="1">Make a new key</button> if it leaks. Away from home? Use your Tailscale address instead of the local one.</p>`;
+    <div class="sxh">③ Shortcut “Save to ${esc(sf)}” <small>- downloads on the server only, nothing opens, nothing is saved on the phone</small></div><ol class="phsteps">
+    <li><b>+</b> → name it <b>Save to ${esc(sf)}</b> → ⓘ → <b>Show in Share Sheet</b> → accepted types: <b>URLs</b> and <b>Text</b>.</li>
+    <li>Add <b>Get Contents of URL</b> with this URL: <code>${esc(g3)}</code> <button class="mini" data-cp="${esc(g3)}">Copy</button><br>Show More: Method <b>POST</b>, Request Body <b>JSON</b>, a <b>Text</b> field <b>url</b> = <b>Shortcut Input</b>.</li>
+    <li>Add <b>Get Dictionary Value</b> → key <b>message</b>, then <b>Show Notification</b> with that value.</li>
+    <li>Share → <b>Save to ${esc(sf)}</b> from TikTok, Instagram, YouTube… You see “⬇️ Downloading to 📂 ${esc(sf)}” and it saves into <i>folders/${esc(sf)}/</i> on the server.</li></ol>
+    <p class="hint">The folder is the one picked in “Save to” on the home page (or “Good”). Pick another and open these steps again to get its link.</p>
+  <p class="hint">Keep these links private. <button class="linkbtn" style="padding:0" data-newkey="1">Make a new key</button> if one leaks. Away from home? Use your Tailscale address instead of the local one.</p>`;
 }
 function initShell() {
   $('phoneSetup').addEventListener('click', async e => {

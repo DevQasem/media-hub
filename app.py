@@ -4741,9 +4741,15 @@ def phone_grab():
     m = re.search(r"https?://[^\s\"']+", str(json_body().get("url") or "") or raw)
     if not m:
         return jsonify(success=False, message="No link found."), 400
-    job, err = enqueue("url", m.group(0), options={"kind": "video"})
+    body = json_body()
+    folder = clean_folder(body.get("folder") or request.args.get("folder"))      # e.g. ?folder=Good -> folders/Good/
+    job, err = enqueue("url", m.group(0), options={"kind": "video", "folder": folder})
     if err:
         return jsonify(success=False, message=err), 400
+    if str(body.get("wait", request.args.get("wait", "1"))).lower() in ("0", "false", "no"):
+        # "download on the server only": answer at once, the Shortcut does not wait for the file
+        where = f"📂 {folder}" if folder else "Media Hub"
+        return jsonify(success=True, job=job["id"], message=f"⬇️ Downloading to {where}"), 202
     end = time.time() + 50
     while time.time() < end and job["status"] in ("queued", "running"):
         time.sleep(0.5)
