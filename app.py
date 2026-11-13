@@ -1214,15 +1214,6 @@ def ytdlp_worker(job, url, category, options, cancel):
                                                   ig_sub="reels" if ig and instagram_info(url)["kind"] == "reel" else "posts")) as ydl:
                     info = ydl.extract_info(url, download=True)
             main, side = job_files(info, folder)
-            if (category == "tiktok" and o["kind"] in ("video", "gif", "sticker") and main
-                    and all(f.lower().endswith(AUDIO_EXT) for f in main) and shutil.which("gallery-dl")):
-                # TikTok photo posts and stories: yt-dlp only sees the music track. Drop that file and let
-                # gallery-dl save the photos (and video) - it fetches the music too.
-                for f in set(main) | set(side):
-                    if mtime_of(folder, f) >= started - 1:
-                        (folder / f).unlink(missing_ok=True)
-                app.logger.info("yt-dlp only found music for %s - photo post or story, using gallery-dl", url)
-                return _tiktok_gallery(job, url, folder, o, cancel)
             files = sorted(set(main) | set(side))
             if not files:
                 if o["kind"] == "subs":
@@ -1259,8 +1250,20 @@ def ytdlp_worker(job, url, category, options, cancel):
         # TikTok photo slideshows are not videos: save the pictures with gallery-dl - but only when that is really the case
         # (a /photo/ link, or yt-dlp says there is no video), not for network errors or filter misses.
         if category == "tiktok" and ("/photo/" in url or re.search(r"no video|unsupported url|not be comprised of video|photo", msg, re.I)):
+            exe = shutil.which("gallery-dl")
+            if not exe:
+                return finish_err(job, "This TikTok post is a photo slideshow. Saving photos needs gallery-dl, which is not installed on the server "
+                                       "(pip install -U gallery-dl --break-system-packages).")
             app.logger.info("yt-dlp cannot read %s - it looks like a photo slideshow, using gallery-dl", url)
-            return _tiktok_gallery(job, url, folder, o, cancel)
+            update(job, message="Photo slideshow - downloading the pictures…")
+            real = resolve_tiktok(url)
+            user, pid = tiktok_ids(real)
+            scratch = Path(tempfile.mkdtemp(prefix="hub-tt-", dir=str(DATA_DIR)))
+            try:
+                return _gallery_run(job, [exe, "-d", str(scratch), real], folder, o, cancel, False, "", None,
+                                    collect_root=scratch, relocate=_tiktok_relocator(scratch, folder, user, pid))
+            finally:
+                shutil.rmtree(scratch, ignore_errors=True)
 
         if type(exc).__name__ == "DownloadError":
             app.logger.warning("yt-dlp could not download %s: %s", url, msg)
@@ -1705,7 +1708,7 @@ def _gallery_path(line, root: Path):
     """gallery-dl prints '<path>' for new files and '# <path>' for ones it skipped (already on disk)."""
     old = line.startswith("# ")
     text = line[2:] if old else line
-    if not (text.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", text)):      # Linux or Windows absolute path
+    if not text.startswith("/"):
         return None, False
     try:
         p = Path(text)
@@ -1947,23 +1950,6 @@ def _tiktok_slideshow_preview(url):
                    site="TikTok", category="tiktok", channel_url="", is_slideshow=True)
 
 
-def _tiktok_gallery(job, url, folder, o, cancel):
-    """Photo posts, slideshows and stories: gallery-dl saves the photos, the music and any video of the post."""
-    exe = shutil.which("gallery-dl")
-    if not exe:
-        return finish_err(job, "This TikTok post is photos (a slideshow or story). Saving photos needs gallery-dl, which is not installed "
-                               "on the server (pip install -U gallery-dl --break-system-packages).")
-    update(job, message="Photo post / story - downloading the pictures…")
-    real = resolve_tiktok(url)
-    user, pid = tiktok_ids(real)
-    scratch = Path(tempfile.mkdtemp(prefix="hub-tt-", dir=str(DATA_DIR)))
-    try:
-        return _gallery_run(job, [exe, "-d", str(scratch), real], folder, o, cancel, False, "", None,
-                            collect_root=scratch, relocate=_tiktok_relocator(scratch, folder, user, pid))
-    finally:
-        shutil.rmtree(scratch, ignore_errors=True)
-
-
 def _tiktok_relocator(tmp, dest_root, user, pid):
     """
     gallery-dl saves wherever ITS layout says. We download into a scratch folder instead and put the photos where the
@@ -1974,23 +1960,11 @@ def _tiktok_relocator(tmp, dest_root, user, pid):
 
     def run(new, old):
         folder, moved, kept = dest_root / who, [], []
-        tag = f"{who}_{pid or post.replace(' ', '_')}"           # creator_postid: who posted it + which post
-        n_img = n_vid = 0
-        for rel in sorted(set(new) | set(old)):
+        for i, rel in enumerate(sorted(set(new) | set(old)), 1):
             src = tmp / rel
             if not src.is_file():
                 continue
-            ext = src.suffix.lower()
-            if ext in IMG_EXT:
-                n_img += 1
-                name = f"{tag}_{n_img:03d}{ext}"
-            elif ext in AUDIO_EXT:
-                name = f"{tag}_music{ext}"
-            elif ext in VIDEO_EXT:
-                n_vid += 1
-                name = f"{tag}{'' if n_vid == 1 else f'_{n_vid}'}{ext}"
-            else:
-                name = src.name
+            name = f"{pid or post}_{i:03d}{src.suffix.lower()}" if src.suffix.lower() in IMG_EXT else src.name
             dst = folder / name
             rel_dst = dst.relative_to(dest_root).as_posix()
             if dst.exists():
@@ -2002,7 +1976,7 @@ def _tiktok_relocator(tmp, dest_root, user, pid):
                 moved.append(rel_dst)
             except OSError:
                 continue
-        return moved, kept, f"tiktok/{who}/"
+        return moved, kept, f"tiktok/{who}/{post}/"
     return run
 
 
@@ -2059,8 +2033,6 @@ def preview():
             return _ig_preview(url, igx)
     try:
         info = preview_pool.submit(_fetch_info, url).result(timeout=PREVIEW_TIMEOUT)
-        if tiktok and info.get("formats") and not any((f.get("vcodec") or "none") != "none" for f in info["formats"]):
-            return _tiktok_slideshow_preview(url)                # only music = photos / story: say so on the card
         extra = {}
         if igx:
             extra = {"ig": {"kind": "reel", "gallery_dl": bool(shutil.which("gallery-dl")), "login": cookie_status(), "cap": 0}}
