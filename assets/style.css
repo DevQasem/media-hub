@@ -1159,3 +1159,7 @@ html[data-scheme="light"] .scg-tap { background:rgba(0,0,0,.28); }
 @media (max-width:560px) { .scg-phone { flex-basis:240px; height:550px; } .scg-panel { max-width:none; } }
 .warnbox .scg b, .warnbox .scsetup b { color:inherit; }
 .warnbox .scg-tr b, .warnbox .scg-libtop b { color:var(--ios-blue); }
+
+/* TikTok login inside Settings (it used to live on the Live page) */
+.sxpane .lvlogin { display:flex; flex-direction:column; gap:10px; }
+.lvloginst.mid { background:color-mix(in srgb,var(--tt-c,#25f4ee) 10%,transparent); }

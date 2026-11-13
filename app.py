@@ -226,20 +226,37 @@ def prune_jobs():
             cancels.pop(jid, None)
 
 
+def clean_creator(v):
+    """A creator name -> one safe folder name ("" when there is none)."""
+    s = re.sub(r'[\x00-\x1f<>:"/\\|?*]', "", str(v or "")).strip().lstrip("@").strip(".")[:60].strip()
+    return "" if s.lower() in ("", "unknown", "na", "none") else s
+
+
+def folder_dest(folder, creator=""):
+    """folders/<name>/ , or folders/<name>/<creator>/ when "sort by creator" is on (the default)."""
+    base = BASE_DIR / "folders" / clean_folder(folder)
+    c = clean_creator(creator) if settings.get("folder_by_creator", True) else ""
+    return base / c if c else base
+
+
 def move_to_folder(job, files):
-    """Move a finished job's files into folders/<name>/ (the "Save to" choice). Returns {old rel: new rel}."""
+    """Move a finished job's files into folders/<name>/[<creator>/] (the "Save to" choice). Returns {old rel: new rel}."""
     name = clean_folder(job.get("folder"))
     if not name or job.get("category") not in CATEGORIES:
         return {}
-    src_root, dest = BASE_DIR / job["category"], BASE_DIR / "folders" / name
+    src_root = BASE_DIR / job["category"]
+    # who posted it: the worker tells us, otherwise the creator folder the file was downloaded into (tiktok/<user>/…)
+    first = next((Path(f).parts[0] for f in files if len(Path(f).parts) >= 2), "")
+    dest = folder_dest(name, job.get("creator") or first)
     dest.mkdir(parents=True, exist_ok=True)
+    sub = dest.relative_to(BASE_DIR / "folders").as_posix()
     moved, emptied = {}, set()
     for rel in files:
         p = src_root / rel
         if not p.is_file():
             continue
         if p.parent.resolve() == dest.resolve():             # already there (downloaded into the same folder again)
-            moved[rel] = f"{name}/{p.name}"
+            moved[rel] = f"{sub}/{p.name}"
             continue
         target, k = dest / p.name, 2
         while target.exists():
@@ -249,7 +266,7 @@ def move_to_folder(job, files):
         except OSError:
             continue
         _retag(fs_rel(p), fs_rel(target))
-        moved[rel] = f"{name}/{target.name}"
+        moved[rel] = f"{sub}/{target.name}"
         emptied.add(p.parent)
     for d in emptied:                                          # tidy up folders the move left empty
         while d != src_root and src_root in d.parents:
@@ -272,7 +289,7 @@ def finish_ok(job, files, message=None, fresh=None):
             files = [moved.get(f, f) for f in files if f in moved]
             fresh = [moved[f] for f in (files if fresh is None else fresh) if f in moved] if fresh is not None else None
             update(job, category="folders")
-            message = (message or f"Saved {len(files)} file(s)") + f" · 📂 in {clean_folder(job['folder'])}"
+            message = (message or f"Saved {len(files)} file(s)") + f" · 📂 in {files[0].rsplit('/', 1)[0] if files else clean_folder(job['folder'])}"
     update(job, status="done", progress=100, files=list(files), speed="", eta="",
            fresh=list(files if fresh is None else fresh),
            message=message or f"Saved {len(files)} file(s)", finished=time.time())
@@ -413,20 +430,21 @@ def cookie_status() -> dict:
 
 
 @contextmanager
-def cookie_copy():
+def cookie_copy(src=None):
     """
     A private temporary copy of cookies.txt for ONE job/preview, deleted afterwards.
     (yt-dlp rewrites its cookie file on exit, so jobs must never share the real file.)
     Yields the path, or None when no login is saved.
     """
-    if not COOKIES_FILE.is_file():
+    src = src or COOKIES_FILE
+    if not src.is_file():
         yield None
         return
     d = tempfile.mkdtemp(prefix="hub-ck-")               # mode 0700
     try:
         dst = os.path.join(d, "cookies.txt")
         try:
-            shutil.copyfile(COOKIES_FILE, dst)
+            shutil.copyfile(src, dst)
             os.chmod(dst, 0o600)
         except OSError:
             dst = None
@@ -437,6 +455,11 @@ def cookie_copy():
 
 def cookie_ctx(use: bool):
     return cookie_copy() if use else nullcontext(None)
+
+
+def tt_login_for_downloads():
+    """Use the saved TikTok login for normal TikTok downloads too (better quality, 18+/private videos)."""
+    return settings.get("tt_login_downloads", True) and TT_COOKIES_FILE.is_file()
 
 
 # ---- Instagram link types ----------------------------------------------------
@@ -1209,10 +1232,21 @@ def ytdlp_worker(job, url, category, options, cancel):
     try:
         with named_lock(f"url:{url}", cancel, job):
             started = clock["start"] = time.time()     # "fresh" = written after THIS moment, not while we waited
-            with cookie_ctx(ig) as cf:                 # private cookie copy, deleted right after
-                with YoutubeDL(build_ydl_opts(o, folder, hook, cookiefile=cf, ig=ig,
-                                                  ig_sub="reels" if ig and instagram_info(url)["kind"] == "reel" else "posts")) as ydl:
-                    info = ydl.extract_info(url, download=True)
+            tries = [True, False] if category == "tiktok" and tt_login_for_downloads() else [False]
+            for n_try, with_login in enumerate(tries):
+                try:
+                    with (cookie_copy(TT_COOKIES_FILE) if with_login else cookie_ctx(ig)) as cf:   # private copy, deleted right after
+                        with YoutubeDL(build_ydl_opts(o, folder, hook, cookiefile=cf, ig=ig,
+                                                          ig_sub="reels" if ig and instagram_info(url)["kind"] == "reel" else "posts")) as ydl:
+                            info = ydl.extract_info(url, download=True)
+                    break
+                except DownloadCancelled:
+                    raise
+                except Exception:  # noqa: BLE001   the login must never be the reason a download fails
+                    if n_try == len(tries) - 1:
+                        raise
+                    app.logger.info("TikTok download with the saved login failed for %s - trying without it", url)
+                    update(job, message="Trying again without the TikTok login…")
             main, side = job_files(info, folder)
             files = sorted(set(main) | set(side))
             if not files:
@@ -1236,7 +1270,8 @@ def ytdlp_worker(job, url, category, options, cancel):
             fresh_now = (set(fresh) & set(files)) | made_now
             mode = settings.get("auto_name", "creator")
             auto = not o["name"] and mode in ("date", "creator") and o["kind"] != "subs"     # nothing typed: [creator_]date + number (subtitles keep ".en")
-            dest = BASE_DIR / "folders" / clean_folder(job.get("folder")) if clean_folder(job.get("folder")) else None
+            update(job, creator=creator_of(info))
+            dest = folder_dest(job["folder"], job["creator"]) if clean_folder(job.get("folder")) else None
             m = rename_files(folder, sorted(set(files) & fresh_now), o, auto, prefix=creator_of(info) if mode == "creator" else "", also=dest)
             if m:
                 files = sorted({m.get(f, f) for f in files}); fresh_now = {m.get(f, f) for f in fresh_now}
@@ -1899,7 +1934,8 @@ def index():
 
 
 def _fetch_info(url):
-    with cookie_ctx(is_instagram(url)) as cf:
+    tt = detect_category(url) == "tiktok" and tt_login_for_downloads()
+    with (cookie_copy(TT_COOKIES_FILE) if tt else cookie_ctx(is_instagram(url))) as cf:
         opts = {"skip_download": True, "noplaylist": True, "quiet": True, "no_warnings": True, "socket_timeout": 15}
         if cf:
             opts["cookiefile"] = cf
@@ -1948,6 +1984,74 @@ def _tiktok_slideshow_preview(url):
     return jsonify(success=True, title=oe.get("title") or "TikTok photo post", thumbnail=oe.get("thumbnail_url") or "",
                    uploader=oe.get("author_unique_id") or user or oe.get("author_name") or "", duration=None, views=None, upload_date=None,
                    site="TikTok", category="tiktok", channel_url="", is_slideshow=True)
+
+
+TT_STORIES_RE = re.compile(r"^https?://(?:www\.|m\.)?tiktok\.com/@([A-Za-z0-9._-]{2,24})/stories/?(?:[?#].*)?$", re.I)
+
+
+def tt_stories_user(url):
+    m = TT_STORIES_RE.match(url or "")
+    return m.group(1) if m else None
+
+
+def tiktok_stories_worker(job, user, o, cancel):
+    """Save @user's current TikTok stories (photos, videos, music) with gallery-dl - uses the saved TikTok login."""
+    exe = shutil.which("gallery-dl")
+    if not exe:
+        return finish_err(job, "Saving TikTok stories needs gallery-dl, which is not installed on the server.")
+    update(job, status="running", message=f"Looking for @{user}'s stories…", progress=2)
+    folder = BASE_DIR / "tiktok"
+    scratch = Path(tempfile.mkdtemp(prefix="hub-tts-", dir=str(DATA_DIR)))
+    try:
+        with cookie_copy(TT_COOKIES_FILE) as cf:
+            cmd = [exe, "-d", str(scratch)] + (["--cookies", cf] if cf else []) + [f"https://www.tiktok.com/@{user}/stories"]
+            _gallery_run(job, cmd, folder, o, cancel, False, "", None,
+                         collect_root=scratch, relocate=_tiktok_story_relocator(scratch, folder, user))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    if job["status"] == "error" and job["message"] != "Cancelled by user":
+        hint = (" TikTok shows stories only to logged-in viewers - add your TikTok login in Settings → TikTok."
+                if not TT_COOKIES_FILE.is_file() else "")
+        update(job, message=f"No stories found for @{user} right now (TikTok stories disappear after 24 hours).{hint}")
+        save_jobs()
+    return None
+
+
+def _tiktok_story_relocator(tmp, dest_root, user):
+    """Stories go to tiktok/<user>/stories/  as  user_story_<id>_001.jpg / user_story_<id>.mp4 / user_story_<id>_music.m4a."""
+    who = re.sub(r"[^\w.\-]", "_", user or "")[:60].strip("._") or "unknown"
+
+    def run(new, old):
+        folder, moved, kept = dest_root / who / "stories", [], []
+        for rel in sorted(set(new) | set(old)):
+            src = tmp / rel
+            if not src.is_file():
+                continue
+            ext = src.suffix.lower()
+            m = re.match(r"(\d{6,})(?:_(\d+))?", src.name)
+            sid = m.group(1) if m else re.sub(r"[^\w.\-]", "_", src.stem)[:40]
+            idx = int(m.group(2)) if m and m.group(2) else 1
+            if ext in IMG_EXT:
+                name = f"{who}_story_{sid}_{idx:03d}{ext}"
+            elif ext in AUDIO_EXT:
+                name = f"{who}_story_{sid}_music{ext}"
+            elif ext in VIDEO_EXT:
+                name = f"{who}_story_{sid}{ext}"
+            else:
+                continue                                   # no .json / .txt side files
+            dst = folder / name
+            rel_dst = dst.relative_to(dest_root).as_posix()
+            if dst.exists():
+                kept.append(rel_dst)                       # saved before: keep it, do not duplicate
+                continue
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+                moved.append(rel_dst)
+            except OSError:
+                continue
+        return moved, kept, f"tiktok/{who}/stories/"
+    return run
 
 
 def _tiktok_relocator(tmp, dest_root, user, pid):
@@ -2001,6 +2105,11 @@ def preview():
     if not valid_http_url(url):
         return jsonify(success=False, error="That doesn't look like a valid link."), 400
 
+    su = tt_stories_user(url)
+    if su:                                                       # tiktok.com/@user/stories: no network call needed for the card
+        return jsonify(success=True, title=f"Stories of @{su}", thumbnail="", uploader="@" + su, duration=None, views=None,
+                       upload_date=None, site="TikTok stories", category="tiktok", channel_url="",
+                       stories={"user": su, "login": TT_COOKIES_FILE.is_file()})
     lu = live_user_from(url)
     if lu:                                                       # TikTok LIVE link: say whether they are live now
         try:
@@ -2256,6 +2365,9 @@ def enqueue(action, target, quality="best", batch=None, options=None, only=None)
         category = detect_category(target)
         opts = sanitize_options(options if options else {"quality": quality})
         fn, args, label = ytdlp_worker, (target, category, opts, cancel), target
+        su = tt_stories_user(target)
+        if su:                                                   # tiktok.com/@user/stories: their current stories (gallery-dl)
+            fn, args, label = tiktok_stories_worker, (su, opts, cancel), f"📖 @{su} stories"
         if category == "instagram":
             kind = instagram_info(target)["kind"]
             if kind == "unknown":
@@ -2267,7 +2379,8 @@ def enqueue(action, target, quality="best", batch=None, options=None, only=None)
     job = {"id": uuid.uuid4().hex[:12], "category": category, "label": label,
            "status": "queued", "progress": 0, "message": "Waiting in queue…",
            "speed": "", "eta": "", "files": [], "fresh": [], "created": time.time(),
-           "finished": None, "batch": batch, "folder": sanitize_options(options)["folder"]}
+           "finished": None, "batch": batch, "folder": sanitize_options(options)["folder"],
+           "creator": target.lstrip("@").strip() if action == "snapchat" else (tt_stories_user(target) or "")}
     with lock:
         jobs[job["id"]], cancels[job["id"]] = job, cancel
     queue_add(job, fn, args)
@@ -3166,6 +3279,42 @@ def tiktok_cookies():
     return jsonify(success=True, **tt_login_status(check=request.args.get("check") == "1"))
 
 
+_LOOSE_RE = re.compile(r"^(.+?)_(?:\d{4}-\d{2}-\d{2}_\d{3}|story_\d{6,}|\d{12,}_(?:\d{3}|music))")
+
+
+@app.route("/fs/organize-folders", methods=["POST"])
+def fs_organize_folders():
+    """Move files lying loose in folders/<name>/ into folders/<name>/<creator>/, using the creator in their name."""
+    root, moved, left = BASE_DIR / "folders", 0, 0
+    if not root.is_dir():
+        return jsonify(success=True, moved=0, left=0)
+    for d in root.iterdir():
+        if not d.is_dir():
+            continue
+        for f in list(d.iterdir()):
+            if not f.is_file() or f.name.startswith(".") or is_partial(f.name):
+                continue
+            m = _LOOSE_RE.match(f.name)
+            who = clean_creator(m.group(1)) if m else ""
+            if not who:
+                left += 1
+                continue
+            dst_dir = d / who
+            dst_dir.mkdir(exist_ok=True)
+            target, k = dst_dir / f.name, 2
+            while target.exists():
+                target, k = dst_dir / f"{f.stem} ({k}){f.suffix}", k + 1
+            try:
+                shutil.move(str(f), str(target))
+            except OSError:
+                left += 1
+                continue
+            _retag(fs_rel(f), fs_rel(target))
+            moved += 1
+    fs_dirty()
+    return jsonify(success=True, moved=moved, left=left)
+
+
 @app.route("/folders")
 def folders_list():
     """Your own folders (names only) for the "Save to" picker."""
@@ -3822,6 +3971,8 @@ def settings_api():
             settings["ntfy"] = str(d["ntfy"] or "").strip()[:200]
         if "creator_folders" in d:
             settings["creator_folders"] = bool(d["creator_folders"])
+        if "folder_by_creator" in d:
+            settings["folder_by_creator"] = bool(d["folder_by_creator"])
         if "ig_organize" in d:
             settings["ig_organize"] = bool(d["ig_organize"])
         if d.get("auto_name") in ("creator", "date", "keep"):
@@ -3850,6 +4001,8 @@ def settings_api():
             settings["clean_urls"] = bool(d["clean_urls"])
         if "live_helper" in d:
             settings["live_helper"] = bool(d["live_helper"])
+        if "tt_login_downloads" in d:
+            settings["tt_login_downloads"] = bool(d["tt_login_downloads"])
         for k in ("live_chat", "live_chat_subs", "live_notify"):
             if k in d:
                 settings[k] = bool(d[k])
@@ -3894,13 +4047,14 @@ def settings_api():
                 return jsonify(success=False, message="The profile limit must be a number (1-500)."), 400
         _save(SETTINGS_FILE, settings)
     return jsonify(success=True, ntfy=settings.get("ntfy", ""),
-                   creator_folders=settings.get("creator_folders", True), ig_organize=settings.get("ig_organize", True), auto_name=settings.get("auto_name", "creator"), prefer_h264=settings.get("prefer_h264", True),
+                   creator_folders=settings.get("creator_folders", True), folder_by_creator=settings.get("folder_by_creator", True), ig_organize=settings.get("ig_organize", True), auto_name=settings.get("auto_name", "creator"), prefer_h264=settings.get("prefer_h264", True),
                    notify_downloads=settings.get("notify_downloads", False),
                    name_template=settings.get("name_template", ""), speed_limit=settings.get("speed_limit", "0"),
                    parallel_parts=settings.get("parallel_parts", 1), pace=settings.get("pace", "off"),
                    retry_count=settings.get("retry_count", 3), clean_urls=settings.get("clean_urls", True),
                    live_helper=settings.get("live_helper", True), live_max_hours=settings.get("live_max_hours", 6),
                    live_ready=_cffi is not None, live_quality=settings.get("live_quality", "best"),
+                   tt_login_downloads=settings.get("tt_login_downloads", True),
                    live_chat=settings.get("live_chat", False), live_chat_subs=settings.get("live_chat_subs", True),
                    live_chat_key_set=bool(settings.get("live_chat_key")), live_notify=settings.get("live_notify", True),
                    live_max_minutes=live_max_minutes(), live_min_free_gb=settings.get("live_min_free_gb", 2),
@@ -4073,6 +4227,10 @@ def auto_tags(rel, is_dir=False):
     if parts[0] == "folders":
         if len(parts) >= 3 or (is_dir and len(parts) >= 2):
             t.add(_tagname(parts[1]))
+        if len(parts) >= 4 or (is_dir and len(parts) >= 3):      # folders/Good/<creator>/file -> @creator too
+            u = _tagname(parts[2]).lstrip("@")
+            if u:
+                t.add("@" + u)
     elif len(parts) >= 3 or (is_dir and len(parts) >= 2):
         u = _tagname(parts[1]).lstrip("@")
         if u:

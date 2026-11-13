@@ -181,7 +181,7 @@ function sxPane(n) {
   SX.pane = n;
   document.querySelectorAll('#sxnav [data-sec]').forEach(b => b.classList.toggle('on', b.dataset.sec === n));
   document.querySelectorAll('.sxpane').forEach(s => s.classList.toggle('on', s.dataset.pane === n));
-  if (n === 'tools') loadVersion(); if (n === 'ig') loadIg();
+  if (n === 'tools') loadVersion(); if (n === 'ig') loadIg(); if (n === 'tiktok' && typeof ttLoginLoad === 'function') ttLoginLoad(true);
 }
 function openSettings(sec) { $('smodal').classList.add('open'); sxPane(typeof sec === 'string' ? sec : SX.pane); }
 function setTab(t) {
@@ -248,6 +248,7 @@ const LIVE_RE = /^https?:\/\/(?:www\.|m\.)?tiktok\.com\/@([A-Za-z0-9._-]{2,24})\
 function videoPreview(url) {
   AppState.mode = 'video'; AppState.videoUrl = url;
   const lm = url.match(LIVE_RE); AppState.liveUser = lm ? lm[1] : null; AppState.liveOn = null; liveWint(!!lm);
+  const sm = url.match(/^https?:\/\/(?:www\.|m\.)?tiktok\.com\/@([A-Za-z0-9._-]{2,24})\/stories\b/i); AppState.storiesUser = sm ? sm[1] : null;
   const d = detect(url); setBrand(d.key); $('actions').classList.add('show');
   AppState.timer = setTimeout(async () => {
     const mine = ++AppState.seq;
@@ -261,6 +262,7 @@ function videoPreview(url) {
     if (!r.success) { $('preview').classList.remove('show'); AppState.noPreview = true; refreshOpts(); return setHint((r.error || 'No preview for this link.') + ' You can still try the download.', true); }
     if (r.gallery) return igCard(r, d);
     if (r.live) return liveCard(r);
+    if (r.stories) return storiesCard(r);
 
     setHint(''); $('siteBadge').textContent = r.site || d.name;
     AppState.chanUrl = r.channel_url || ''; AppState.chanName = r.uploader || '';
@@ -402,6 +404,9 @@ function updateGo(o, lk) {
   if (AppState.mode === 'snap') {
     label = 'Download all stories'; sub = 'Public stories · saved in snapchat/';
   }
+  else if (AppState.storiesUser) {
+    label = 'Download stories'; sub = `Photos and videos from the last 24 hours · tiktok/${AppState.storiesUser}/stories/`; icon = '📖';
+  }
   else if (AppState.liveUser) {
     label = AppState.liveOn === false ? 'Not live right now' : 'Record live';
     sub = AppState.liveOn === false ? 'Press Watch below to record when they go live' : AppState.liveOn ? `Until the live ends or you stop it · tiktok/${AppState.liveUser}/lives/` : 'Checking if they are live…';
@@ -517,7 +522,8 @@ async function run(payload, title) {
 }
 function openProgress(title) {
   AppState.resultOpen = false; $('modal').classList.add('open'); $('m-load').style.display = ''; $('m-res').style.display = 'none';
-  $('ltitle').textContent = title; $('bar').style.width = '0'; setRing(0); $('lmsg').textContent = 'Starting…'; $('lmeta').textContent = ''; $('cancelBtn').disabled = false;
+  $('ltitle').textContent = title; $('bar').style.width = '0';
+  if (AppState.storiesUser && /Downloading/.test(title)) $('ltitle').textContent = `📖 Saving @${AppState.storiesUser}'s stories…`; setRing(0); $('lmsg').textContent = 'Starting…'; $('lmeta').textContent = ''; $('cancelBtn').disabled = false;
   $('cancelBtn').textContent = /Recording .*live/.test(title) ? '⏹ Stop & save' : 'Cancel';
 }
 function setRing(p) { p = Math.max(0, Math.min(100, +p || 0)); $('mring').style.setProperty('--p', p); $('mpct').textContent = Math.round(p) + '%'; $('mring').classList.toggle('ind', p < 1); }
@@ -792,9 +798,10 @@ function tplPreview() { const t = $('nameTpl').value.trim(); $('tplprev').textCo
 async function saveTpl() { const r = await post('/settings', {name_template: $('nameTpl').value.trim()}); $('nameTpl').value = r.name_template || ''; tplPreview(); toast(r.name_template ? 'Name template saved ✓' : 'Back to the normal name'); }
 async function loadSettings() {
   const d = await api('/settings');
-  if (d.success) { $('ntfy').value = d.ntfy || ''; $('creatorFolders').checked = d.creator_folders !== false; $('igOrganize').checked = d.ig_organize !== false; $('autoName').value = d.auto_name || 'creator'; $('preferH264').checked = d.prefer_h264 !== false; $('notifyDl').checked = !!d.notify_downloads; $('igcap').value = d.ig_cap || 30;
+  if (d.success) { $('ntfy').value = d.ntfy || ''; $('creatorFolders').checked = d.creator_folders !== false; if ($('folderByCreator')) $('folderByCreator').checked = d.folder_by_creator !== false; $('igOrganize').checked = d.ig_organize !== false; $('autoName').value = d.auto_name || 'creator'; $('preferH264').checked = d.prefer_h264 !== false; $('notifyDl').checked = !!d.notify_downloads; $('igcap').value = d.ig_cap || 30;
     $('nameTpl').value = d.name_template || ''; $('speedLimit').value = d.speed_limit || '0'; $('parallelParts').value = String(d.parallel_parts || 1); $('paceSel').value = d.pace || 'off'; $('retryCount').value = String(d.retry_count ?? 3); $('cleanUrls').checked = d.clean_urls !== false; tplPreview();
     if ($('liveQuality')) $('liveQuality').value = d.live_quality || 'best';
+    if ($('ttForDl')) $('ttForDl').checked = d.tt_login_downloads !== false;
     if ($('liveHelper')) { $('liveHelper').checked = d.live_helper !== false; $('liveMax').value = String(d.live_max_hours || 6); $('liveReady').textContent = d.live_ready === false ? '⚠ curl_cffi is not installed on the server - TikTok will block live checks more often. Rebuild the Docker image.' : ''; }
     if ($('digestSel')) { $('digestSel').value = d.digest || 'off'; $('digestHour').value = String(d.digest_hour ?? 20); digestNote(d.digest_waiting || 0); } }
   $('clipOn').checked = clipEnabled(); loadVersion(); loadIg();
@@ -2091,7 +2098,7 @@ async function lvOpt(key, val, msg) {
 function ttLoginPaint(st) {
   const el = $('ttLoginStatus'); if (!el || !st) return;
   let t, cls;
-  if (!st.saved) { t = '⚪ Not logged in - recording as a logged-out viewer'; cls = ''; }
+  if (!st.saved) { t = '⚪ Not logged in - TikTok treats you as a logged-out viewer'; cls = ''; }
   else if (!st.has_session) { t = '⚠ Saved, but there is no login in it (no “sessionid”). Export again while logged in.'; cls = 'warn'; }
   else if (st.session_expired) { t = '⚠ The login has expired - export a fresh cookies.txt.'; cls = 'warn'; }
   else if (st.user) { t = `🟢 Logged in as @${st.user}`; cls = 'ok'; }
@@ -2247,3 +2254,38 @@ function scgGo(i) {
     tap.classList.remove('show'); void tap.offsetWidth; tap.classList.add('show');
   }, 420);
 }
+
+
+/* ================= TikTok: stories card + Settings tab ================= */
+function storiesCard(r) {
+  const S = r.stories; setHint('');
+  $('preview').classList.add('no-thumb'); $('thumb').style.display = 'none';
+  $('siteBadge').textContent = 'TikTok stories'; $('ptitle').textContent = r.title; $('plnote').style.display = 'none';
+  $('chips').innerHTML = ['📖 Stories (last 24 h)', '👤 @' + S.user, `📁 tiktok/${S.user}/stories/`, S.login ? ['🔑 Using your TikTok login', 'ok'] : ['⚠ No TikTok login - stories may be hidden', 'bad']].map(chipHtml).join('');
+  refreshOpts();
+}
+(function initTikTokTab() {
+  safeBind('ttForDl', 'change', async () => { await post('/settings', {tt_login_downloads: $('ttForDl').checked}); toast($('ttForDl').checked ? 'TikTok downloads use your login (full quality)' : 'TikTok downloads without login'); });
+  const go = () => {
+    let u = String($('ttStoryUser').value || '').trim(); const m = u.match(/tiktok\.com\/@([A-Za-z0-9._-]{2,24})/i);
+    u = (m ? m[1] : u.replace(/^@/, '')).trim();
+    if (!/^[A-Za-z0-9._-]{2,24}$/.test(u)) return toast('Type a TikTok username, like @name');
+    closeSettings(); AppState.storiesUser = u;
+    run({action_type:'url', target:`https://www.tiktok.com/@${u}/stories`, options:getOpts()}, `📖 Saving @${u}'s stories…`);
+    $('ttStoryUser').value = '';
+  };
+  safeBind('ttStoryBtn', 'click', go);
+  if ($('ttStoryUser')) $('ttStoryUser').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
+})();
+
+
+/* ================= Save-to folders: sort by creator ================= */
+(function initFolderByCreator() {
+  safeBind('folderByCreator', 'change', async () => { await post('/settings', {folder_by_creator: $('folderByCreator').checked}); toast($('folderByCreator').checked ? '📂 New files go to Good/username/' : '📂 New files go straight into Good/'); });
+  safeBind('organizeBtn', 'click', async () => {
+    if (!(await xUnlock())) return;
+    if (!confirm('Move the files lying loose in your folders (like Good) into a folder per creator?')) return;
+    const r = await post('/fs/organize-folders', {});
+    toast(r.success ? `📂 Sorted ${r.moved} file${r.moved === 1 ? '' : 's'}` + (r.left ? ` · ${r.left} without a creator name stayed` : '') : (r.message || 'Could not sort'));
+  });
+})();
