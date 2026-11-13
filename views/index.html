@@ -27,7 +27,7 @@
 <div class="shell">
 <aside class="rail" id="rail" aria-label="Main">
   <button data-nav="home" class="on"><span>🏠</span><b>Download</b></button>
-  <button data-nav="live"><span>🔴</span><b>Live</b><em id="rnLive"></em></button>
+  <button data-nav="live"><span>🎵</span><b>TikTok</b><em id="rnLive"></em></button>
   <button data-nav="queue"><span>☰</span><b>Queue</b></button>
   <button data-nav="watch"><span>👁</span><b>Watchlist</b><em id="rnWatch"></em></button>
   <button data-nav="files"><span>📁</span><b>Files</b></button>
@@ -190,12 +190,14 @@
   </section>
 
   <!-- TikTok LIVE page -->
-  <section class="livepage view-live" id="livePage" aria-label="TikTok LIVE">
+  <section class="livepage view-live" id="livePage" aria-label="TikTok" data-tt="live">
     <header class="lvhead">
-      <div><h2>🔴 TikTok LIVE</h2><p class="hint" style="margin:2px 0 0">Record lives now, or watch accounts and record every time they go live.</p></div>
+      <div><h2>🎵 TikTok</h2><p class="hint" style="margin:2px 0 0">Record lives and save people’s stories.</p>
+        <div class="ttabs" role="tablist"><button data-tt="live" class="on" role="tab">🔴 Live</button><button data-tt="stories" role="tab">📖 Stories</button></div></div>
       <div class="lvhr"><div class="lvstats" id="lvStats"></div><button class="btn ghost lvoptbtn" id="lvOptBtn" aria-expanded="false" aria-controls="lvOpts">⚙ Options</button></div>
     </header>
 
+    <div class="ttpane on" data-ttp="live">
     <div class="lvopts" id="lvOpts" hidden>
       <div class="lvoptgrid">
         <section>
@@ -247,6 +249,17 @@
 
     <h3 class="sec lvsec">🎞 Saved lives <em id="lvSavedSum"></em></h3>
     <div id="lvSaved"></div>
+    </div>
+
+    <div class="ttpane" data-ttp="stories">
+      <div class="lvadd">
+        <input id="ttStoryUser" placeholder="@username or tiktok.com/@user" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="TikTok username">
+        <button class="btn primary" id="ttStoryBtn">📖 Download stories</button>
+      </div>
+      <p class="hint">Saves everything someone posted to their story in the last 24 hours - videos in the best quality, photos with their music - into <i>tiktok/&lt;user&gt;/stories/</i>, or your <b>Save to</b> folder (Good/&lt;user&gt;/). Stories you already have are skipped. Some people show stories only to logged-in viewers: add your login in <a href="#" onclick="openSettings('tiktok');return false">Settings → TikTok</a>.</p>
+      <h3 class="sec lvsec">🎞 Saved stories <em id="stSavedSum"></em></h3>
+      <div id="stSaved"></div>
+    </div>
   </section>
 
 
@@ -358,9 +371,7 @@
         <label class="tg" style="display:block;margin-top:14px"><input type="checkbox" id="ttForDl"><span>Use my login for normal TikTok downloads (full quality, 18+ videos)</span></label>
         <p class="hint" style="margin-top:4px">If a download fails with the login, Media Hub tries again without it by itself.</p>
 
-        <div class="sublab" style="margin-top:18px">📖 Stories</div>
-        <p class="hint" style="margin:0 0 8px">Saves someone's current stories (photos, videos and music) into <i>tiktok/&lt;user&gt;/stories/</i>. Stories disappear after 24 hours, and TikTok usually shows them only when you are logged in. You can also paste a <b>tiktok.com/@user/stories</b> link on the home page.</p>
-        <div class="row2"><input id="ttStoryUser" class="plfilter" style="flex:1 1 200px;height:auto;padding:10px 12px" placeholder="@username or tiktok.com/@user" autocomplete="off" autocapitalize="off" spellcheck="false"><button class="btn primary" id="ttStoryBtn">📖 Download stories</button></div>
+        <p class="hint" style="margin-top:14px">📖 Stories and 🔴 Live are on the <b>TikTok</b> page (left menu / bottom bar).</p>
       </section>
       <section class="sxpane" data-pane="ig">
         <h4>📸 Instagram login</h4>
@@ -430,7 +441,7 @@
 <nav class="tabbar" id="tabbar" aria-label="Main">
   <i class="tabind"></i>
   <button data-tab="home" class="on"><span>🏠</span>Home<em id="tbRun"></em></button>
-  <button data-tab="live"><span>🔴</span>Live<em id="tbLive"></em></button>
+  <button data-tab="live"><span>🎵</span>TikTok<em id="tbLive"></em></button>
   <button data-tab="watch"><span>👁</span>Watchlist<em id="tbWatch"></em></button>
   <button id="navFilesBtn"><span>📁</span>Files</button>
   <button id="navSettingsBtn"><span>⚙️</span>Settings<i class="wdot" data-sdot></i></button>

@@ -2270,7 +2270,7 @@ function storiesCard(r) {
     let u = String($('ttStoryUser').value || '').trim(); const m = u.match(/tiktok\.com\/@([A-Za-z0-9._-]{2,24})/i);
     u = (m ? m[1] : u.replace(/^@/, '')).trim();
     if (!/^[A-Za-z0-9._-]{2,24}$/.test(u)) return toast('Type a TikTok username, like @name');
-    closeSettings(); AppState.storiesUser = u;
+    closeSettings(); AppState.storiesUser = u; setTimeout(() => stLoad(), 4000);
     run({action_type:'url', target:`https://www.tiktok.com/@${u}/stories`, options:getOpts()}, `📖 Saving @${u}'s stories…`);
     $('ttStoryUser').value = '';
   };
@@ -2288,4 +2288,45 @@ function storiesCard(r) {
     const r = await post('/fs/organize-folders', {});
     toast(r.success ? `📂 Sorted ${r.moved} file${r.moved === 1 ? '' : 's'}` + (r.left ? ` · ${r.left} without a creator name stayed` : '') : (r.message || 'Could not sort'));
   });
+})();
+
+
+/* ================= TikTok page: Live / Stories tabs ================= */
+const TT_TAB_KEY = 'hub_tt_tab';
+function ttTab(t) {
+  const pg = $('livePage'); if (!pg) return;
+  pg.dataset.tt = t;
+  pg.querySelectorAll('[data-tt]').forEach(b => { if (b.tagName === 'BUTTON') { b.classList.toggle('on', b.dataset.tt === t); b.setAttribute('aria-selected', String(b.dataset.tt === t)); } });
+  pg.querySelectorAll('.ttpane').forEach(p => p.classList.toggle('on', p.dataset.ttp === t));
+  try { localStorage.setItem(TT_TAB_KEY, t); } catch {}
+  if (t === 'stories') stLoad();
+}
+async function stLoad() {
+  const box = $('stSaved'); if (!box) return;
+  const r = await api('/fs/stories');
+  if (!r.success) {
+    $('stSavedSum').textContent = '';
+    box.innerHTML = r.locked ? '<div class="lvempty lvlock">🔒 Saved stories are behind the file password. <button class="btn ghost" data-stunlock="1">Unlock</button></div>' : `<div class="lvempty">${esc(r.message || 'Could not load the saved stories.')}</div>`;
+    return;
+  }
+  $('stSavedSum').textContent = r.count ? `${r.count} · ${r.users} ${r.users === 1 ? 'person' : 'people'} · ${r.total_h}` : '';
+  if (!r.items.length) { box.innerHTML = '<div class="lvempty">No saved stories yet. Type a username above.</div>'; return; }
+  const by = {};
+  r.items.forEach(x => (by[x.user] = by[x.user] || []).push(x));
+  box.innerHTML = Object.entries(by).map(([u, xs]) => `<div class="stgroup"><div class="sthead">${lvAv(u)}<b>@${esc(u)}</b><em>${xs.length} file${xs.length === 1 ? '' : 's'}</em>
+      <button class="mini" data-stagain="${esc(u)}" title="Check for new stories">↻ New stories</button></div>
+    <div class="stgrid">${xs.map(x => `<a class="sttile" href="${xFileUrl(x)}" target="_blank" rel="noopener" title="${esc(x.name)}">
+      ${x.kind === 'audio' ? '<span class="stic">🎵</span>' : `<img loading="lazy" alt="" src="${xThumb(x)}" onerror="this.remove()">`}
+      ${x.kind === 'video' ? '<i class="stplay">▶</i>' : ''}<small>${esc(new Date(x.modified * 1000).toLocaleString(undefined, {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}))}</small></a>`).join('')}</div></div>`).join('');
+}
+(function initTtTabs() {
+  const pg = $('livePage'); if (!pg) return;
+  pg.querySelector('.ttabs').addEventListener('click', e => { const b = e.target.closest('[data-tt]'); if (b) ttTab(b.dataset.tt); });
+  pg.addEventListener('click', async e => {
+    if (e.target.closest('[data-stunlock]')) { if (await xUnlock()) stLoad(); return; }
+    const g = e.target.closest('[data-stagain]');
+    if (g) { e.preventDefault(); AppState.storiesUser = g.dataset.stagain; run({action_type:'url', target:`https://www.tiktok.com/@${g.dataset.stagain}/stories`, options:getOpts()}, `📖 Saving @${g.dataset.stagain}'s stories…`); setTimeout(stLoad, 5000); }
+  });
+  let t = 'live'; try { t = localStorage.getItem(TT_TAB_KEY) || 'live'; } catch {}
+  ttTab(t === 'stories' ? 'stories' : 'live');
 })();

@@ -1994,12 +1994,165 @@ def tt_stories_user(url):
     return m.group(1) if m else None
 
 
+def _tt_json_retry(url, params, tries=4):
+    """TikTok sometimes answers with its 'please wait' wall (empty reply): wait a little and ask again."""
+    err = None
+    for n in range(tries):
+        try:
+            d = _tt_json(url, params)
+            if d:
+                return d
+        except LiveError as exc:                          # a network hiccup (DNS, timeout): also worth another try
+            err = exc
+        time.sleep(1.5 * (n + 1))
+    if err is not None:
+        raise err
+    return {}
+
+
+def tt_story_items(user):
+    """(stories, total TikTok says exist) for @user, straight from TikTok's story list - the same connection Live uses."""
+    d = _tt_json_retry(f"{TT_WEB}/api-live/user/room/", {"aid": 1988, "sourceType": 54, "uniqueId": user})
+    uid = ((d.get("data") or {}).get("user") or {}).get("id")
+    if not uid:
+        raise LiveError("TikTok account not found." if d.get("statusCode") == 19881007 else "TikTok did not answer - try again in a minute.")
+    items, seen, cursor, total = [], set(), 0, 0
+    for _ in range(10):                                   # pages of 20; a day of stories is never more than that
+        r = _tt_json_retry(f"{TT_WEB}/api/story/item_list/", {"aid": 1988, "authorId": uid, "count": 20, "loadBackward": "false", "cursor": cursor})
+        total = max(total, int(r.get("TotalCount") or 0))
+        batch = r.get("itemList") or []
+        for it in batch:
+            if isinstance(it, dict) and it.get("id") and it["id"] not in seen:
+                seen.add(it["id"])
+                items.append(it)
+        nxt = r.get("MaxCursor")
+        if not batch or not r.get("HasMoreAfter") or not nxt or nxt == cursor:
+            break
+        cursor = nxt
+    return items, total
+
+
+def _story_media(it):
+    """[(kind, url)] for one story: the best video, or every photo + the music of a photo story."""
+    out = []
+    pics = ((it.get("imagePost") or {}).get("images")) or []
+    for im in pics:
+        urls = ((im.get("imageURL") or {}).get("urlList")) or []
+        u = next((x for x in urls if "jpeg" in x or ".jpg" in x), urls[0] if urls else None)
+        if u:
+            out.append(("photo", u))
+    if pics:
+        mu = (it.get("music") or {}).get("playUrl")
+        if mu:
+            out.append(("music", mu))
+        return out
+    v = it.get("video") or {}
+    br = sorted((b for b in v.get("bitrateInfo") or [] if isinstance(b, dict)), key=lambda b: b.get("Bitrate") or 0, reverse=True)
+    for b in br:                                           # highest bitrate first (often 1080p)
+        u = ((b.get("PlayAddr") or {}).get("UrlList") or [None])[0]
+        if u:
+            out.append(("video", u))
+            break
+    else:
+        u = v.get("playAddr") or v.get("downloadAddr")
+        if u:
+            out.append(("video", u))
+    return out
+
+
+_MIME_EXT = {"video/mp4": ".mp4", "image/jpeg": ".jpg", "image/webp": ".webp", "image/png": ".png", "image/heic": ".heic",
+             "audio/mpeg": ".mp3", "audio/mp4": ".m4a", "audio/x-m4a": ".m4a", "audio/aac": ".m4a"}
+
+
+def _tt_fetch(url, timeout=120, limit=800 * 1024 * 1024):
+    """(bytes, content type) from TikTok's CDN with the same browser-like session (and login) as the story list."""
+    s = _tt_session()
+    hdr = {"Referer": "https://www.tiktok.com/", "Range": "bytes=0-"}
+    if s is not None:
+        r = s.get(url, headers=hdr, timeout=timeout)
+        if r.status_code not in (200, 206):
+            raise LiveError(f"TikTok refused the file (HTTP {r.status_code})")
+        return r.content[:limit], (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+    h = dict(TT_HEADERS, **hdr)
+    if tt_cookies():
+        h["Cookie"] = _tt_cookie_header()
+    with urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=timeout) as r:
+        return r.read(limit), (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+
+
+def _tiktok_stories_direct(job, user, cancel):
+    """Download @user's stories ourselves. Returns (new, old, folder hint) or raises when TikTok cannot be read."""
+    update(job, message=f"Looking for @{user}'s stories…", progress=3)
+    items, total = tt_story_items(user)
+    who = re.sub(r"[^\w.\-]", "_", user)[:60].strip("._") or "unknown"
+    folder = BASE_DIR / "tiktok" / who / "stories"
+    new, old = [], []
+    plan = [(it, _story_media(it)) for it in items]
+    n_all = sum(len(m) for _it, m in plan) or 1
+    done = 0
+    for it, media in plan:
+        sid = str(it["id"])
+        n_photo = 0
+        for kind, url in media:
+            if cancel.is_set():
+                raise DownloadCancelled("Cancelled by user")
+            done += 1
+            stem = f"{who}_story_{sid}" + ({"photo": f"_{n_photo + 1:03d}", "music": "_music"}.get(kind, ""))
+            if kind == "photo":
+                n_photo += 1
+            have = [f for f in folder.glob(stem + ".*")] if folder.is_dir() else []
+            if have:                                       # saved before: do not download again
+                old.append(have[0].relative_to(BASE_DIR / "tiktok").as_posix())
+                continue
+            update(job, message=f"Saving story {done} of {n_all}…", progress=round(5 + done / n_all * 90, 1))
+            try:
+                data, ctype = _tt_fetch(url)
+            except Exception as exc:  # noqa: BLE001
+                app.logger.info("Story file %s of @%s failed: %s", sid, user, exc)
+                continue
+            if len(data) < 1000:
+                continue
+            ext = _MIME_EXT.get(ctype) or {"video": ".mp4", "photo": ".jpg", "music": ".m4a"}[kind]
+            folder.mkdir(parents=True, exist_ok=True)
+            dst = folder / (stem + ext)
+            dst.write_bytes(data)
+            ts = it.get("createTime")
+            if isinstance(ts, int) and ts > 0:
+                os.utime(dst, (ts, ts))                    # file date = when the story was posted
+            new.append(dst.relative_to(BASE_DIR / "tiktok").as_posix())
+    return new, old, total, len(items)
+
+
 def tiktok_stories_worker(job, user, o, cancel):
-    """Save @user's current TikTok stories (photos, videos, music) with gallery-dl - uses the saved TikTok login."""
+    """Save @user's current TikTok stories (videos in best quality, photos + music). gallery-dl is only the backup."""
+    update(job, status="running", message=f"Looking for @{user}'s stories…", progress=2)
+    try:
+        new, old, total, n_items = _tiktok_stories_direct(job, user, cancel)
+    except DownloadCancelled:
+        return finish_err(job, "Cancelled by user")
+    except Exception as exc:  # noqa: BLE001   could not read TikTok ourselves: let gallery-dl try
+        app.logger.warning("Direct story download for @%s failed (%s) - trying gallery-dl", user, exc)
+        return _tiktok_stories_gallery(job, user, o, cancel)
+    fs_dirty()
+    if new or old:
+        note = (f"Saved {len(new)} new story file{'s' if len(new) != 1 else ''}" if new
+                else "Already saved - nothing new") + (f" · {len(old)} already saved" if new and old else "")
+        hidden = total - n_items
+        if hidden > 0:
+            note += f" · {hidden} more TikTok only shows to " + ("friends" if TT_COOKIES_FILE.is_file() else "logged-in viewers (add your login in Settings → TikTok)")
+        return finish_ok(job, sorted(set(new) | set(old)), note + f" · saved in tiktok/{user}/stories/", fresh=new)
+    if total:
+        return finish_err(job, f"@{user} has {total} stor{'y' if total == 1 else 'ies'}, but TikTok hides them from you"
+                               + (" (friends only)." if TT_COOKIES_FILE.is_file() else " - add your TikTok login in Settings → TikTok."))
+    return finish_err(job, f"@{user} has no stories right now (TikTok stories disappear after 24 hours).")
+
+
+def _tiktok_stories_gallery(job, user, o, cancel):
+    """Backup: gallery-dl's stories downloader."""
     exe = shutil.which("gallery-dl")
     if not exe:
-        return finish_err(job, "Saving TikTok stories needs gallery-dl, which is not installed on the server.")
-    update(job, status="running", message=f"Looking for @{user}'s stories…", progress=2)
+        return finish_err(job, "Could not read @" + user + "'s stories from TikTok right now - try again in a minute.")
+    update(job, status="running", message=f"Trying another way for @{user}'s stories…", progress=2)
     folder = BASE_DIR / "tiktok"
     scratch = Path(tempfile.mkdtemp(prefix="hub-tts-", dir=str(DATA_DIR)))
     try:
@@ -3220,6 +3373,27 @@ def live_mark(job_id):
         j["marks"].append({"t": t, "note": note})
         n = len(j["marks"])
     return jsonify(success=True, t=t, count=n)
+
+
+@app.route("/fs/stories")
+def fs_stories():
+    """Saved TikTok stories (tiktok/<user>/stories/ and stories moved into your own folders), newest first."""
+    seen, out = set(), []
+    cands = list((BASE_DIR / "tiktok").glob("*/stories/*")) + list((BASE_DIR / "folders").rglob("*_story_*"))
+    for f in cands:
+        if f in seen or not f.is_file() or is_partial(f.name) or file_kind(f.name) == "other":
+            continue
+        seen.add(f)
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        m = re.match(r"(.+?)_story_", f.name)
+        out.append({"path": fs_rel(f), "user": m.group(1) if m else f.parent.parent.name, "name": f.name, "kind": file_kind(f.name),
+                    "size": st.st_size, "size_h": human(st.st_size), "modified": st.st_mtime})
+    out.sort(key=lambda x: -x["modified"])
+    return jsonify(success=True, items=out[:400], count=len(out), total_h=human(sum(x["size"] for x in out)),
+                   users=len({x["user"] for x in out}))
 
 
 @app.route("/fs/lives")
